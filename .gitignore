@@ -1,12 +1,6 @@
-# runtime state — never tracked / never shipped
+# build/runtime droppings a checkout can actually produce. Store-side runtime files are
+# covered by the .gitignore `qq init` writes into each store; state-dir files live outside
+# git entirely (QQ_STATE_DIR).
 *.log
 __pycache__/
 *.pyc
-.prederive/
-pending-findings.md
-.xref-waveoffs
-.audit-baseline
-.audit-memory-manifest
-.qq.lock
-# the embedding cache is derived + large
-embeddings.json
