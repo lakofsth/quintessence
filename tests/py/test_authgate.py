@@ -383,6 +383,33 @@ class TestVerbIntegration(unittest.TestCase):
             self.assertIn("queueing the proposal FAILED", str(ctx.exception))
             self.assertNotIn("text", read_head(store, "sec-topic"))
 
+    def test_concurrent_create_caught_by_under_lock_recheck(self):
+        """The closed race: a gated topic created between the pre-lock existence check and
+        the write lock is caught by the gate_check re-evaluation under the lock — the
+        untrusted update is diverted to the queue, never lands.  The file must exist on
+        disk (simulating the concurrent qq new having completed) so the engine's own
+        pre-lock is_file() check passes."""
+        with tempfile.TemporaryDirectory() as base:
+            store = self.gated_store(base, SONNET)
+            opus_store = Store(store.config.with_overrides(
+                QQ_MODEL_TRANSCRIPT=transcript(base, OPUS, name="opus.jsonl")))
+            w.new(opus_store, "sec-topic", "seed")
+            before = read_head(store, "sec-topic")
+            call_count = [0]
+            def exists_flips(_store, _topic):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return False
+                return True
+            with mock.patch.object(w, '_gate_target_exists', side_effect=exists_flips):
+                with self.assertRaises(w.WriteGateDiverted):
+                    w.update(store, "sec-topic", "sneaky line\n")
+            self.assertEqual(call_count[0], 2)
+            self.assertEqual(read_head(store, "sec-topic"), before)
+            lines = proposed_lines(store)
+            self.assertEqual(len(lines), 1)
+            self.assertIn("sneaky line", lines[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -126,11 +126,12 @@ env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" new sec-fresh "a pro
   && ok "divert: new queues the essence arg, no HEAD created" || no "divert: new shape wrong"
 [ "$(git -C "$SA" rev-parse HEAD)" = "$rev_before" ] && ok "divert: still no commits after all shapes" || no "divert: a commit leaked"
 
-# gated-slug REFUSALS stay refusals (never converted to a queued 'success')
+# gated-slug REFUSALS stay refusals (never converted to a queued 'success') —
+# the under-lock gate re-check also sees the target absent and does not divert
 env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" update sec-missing "text" >/dev/null 2>"$TMP/k.err"
 rc=$?
 [ "$rc" -ne 0 ] && grep -q "needs an existing" "$TMP/k.err" && ! grep -q "sec-missing" "$PF" \
-  && ok "refusal-parity: update to a missing gated HEAD still errors, nothing queued" \
+  && ok "refusal-parity: update to a missing gated HEAD still errors after under-lock re-check, nothing queued" \
   || no "refusal-parity: missing-HEAD update mishandled (rc=$rc)"
 
 # ---- ESCAPE HATCH: QQ_AUTHOR_GATE=0 ---------------------------------------------------------------

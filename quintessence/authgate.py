@@ -30,11 +30,11 @@ $CLAUDE_CODE_SESSION_ID (present in the environment of every command a Claude Co
 runs) as ~/.claude/projects/*/<session-id>.jsonl. No transcript resolvable -> model unknown
 -> not trusted. This is NOT an adversarial control: like the read-side redaction it is a
 structural guard against a well-meaning non-trusted model authoring security topics, not a
-sandbox — a caller who can run `qq` can also edit the queue file. A known timing gap:
-the update verb checks target existence before taking the engine lock, so a concurrent
-create of the same protected topic in that window can let an untrusted update land instead
-of queuing. The landed line is visible and correctable, so the re-check under the lock is
-deliberately deferred.
+sandbox — a caller who can run `qq` can also edit the queue file. Timing: the update verb's pre-lock existence check (_gate_target_exists) is
+re-evaluated under the engine write-lock (quintessence.write._execute_write's gate_check
+callback), so a concurrent create of the same protected topic between the pre-lock check
+and the lock cannot let an untrusted update land — the under-lock re-check diverts it to
+the queue.
 
 QUEUE SEMANTICS: PROPOSED-WRITES is an APPEND-only section (SALIENCE-like, NOT auto-resolve —
 no producer re-emits it; an entry is cleared only by adjudication), written under the A1

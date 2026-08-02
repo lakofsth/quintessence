@@ -15,7 +15,7 @@ them. `CONFIG.md` is pinned to the config registry the same way.
 | Gate | Command | What it covers |
 |---|---|---|
 | Shell suites | `bash tests/run.sh` | 22 end-to-end suites against a throwaway store: the write path, locking, multi-store composition, recall, the consistency checks, redaction, the frozen output surfaces |
-| Python tests | `python3 -m pytest tests/py -q` | 844 tests over the engine modules. Two skip on a machine with no real store to compare against; the rest are hermetic. Includes a generated-docs parity test: `CONFIG.md` must be byte-identical to a fresh render of the config registry, so a documented setting cannot drift from the code |
+| Python tests | `python3 -m pytest tests/py -q` | 845 tests over the engine modules. Two skip on a machine with no real store to compare against; the rest are hermetic. Includes a generated-docs parity test: `CONFIG.md` must be byte-identical to a fresh render of the config registry, so a documented setting cannot drift from the code |
 | Plugin manifest | `claude plugin validate . --strict` | The plugin and marketplace manifests are well-formed and complete |
 
 A cold-install job also runs the whole thing the way a stranger would: fresh `$HOME`,

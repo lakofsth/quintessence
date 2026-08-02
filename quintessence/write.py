@@ -481,7 +481,8 @@ def _post_write_notes(store: Store, rel: str, new_text: str) -> list[str]:
 def _execute_write(store: Store, target: str, content: str, *, msg: Optional[str] = None,
                     base: Optional[str] = None, replace: bool = False, prepend: bool = False,
                     essence_text: Optional[str] = None,
-                    transform: Optional[Callable[[str], str]] = None) -> str:
+                    transform: Optional[Callable[[str], str]] = None,
+                    gate_check: Optional[Callable[[], None]] = None) -> str:
     """The qq-write engine itself — line-for-line port of the bash script's own control flow
     (see the module docstring for the ordering rationale). `essence_text` is the `--essence`
     flag qq-write exposes for direct/scripted use (rides on `prepend` only); no verb wired from
@@ -492,7 +493,12 @@ def _execute_write(store: Store, target: str, content: str, *, msg: Optional[str
     content is derived from the file's live bytes at write time (`transform(current_text)`),
     not from an earlier unlocked read — so a concurrent update that lands between a caller's
     read and this write is IN the input, never silently dropped. A transform caller passes
-    empty `content` and needs no `--base` (the read and write happen under one lock hold)."""
+    empty `content` and needs no `--base` (the read and write happen under one lock hold).
+
+    `gate_check` is a zero-arg callable invoked under the write lock before any file I/O.
+    The `update` verb uses it to re-evaluate the authoring gate's target-existence input
+    under the lock, closing the window where a concurrent `qq new` between the pre-lock
+    check and the lock could let an untrusted update land on a newly-created gated topic."""
     if essence_text is not None and not prepend:
         raise WriteError("qq-write: --essence only works with --prepend-update (REPLACE mode "
                           "composes the full file anyway)", 2)
@@ -517,6 +523,9 @@ def _execute_write(store: Store, target: str, content: str, *, msg: Optional[str
         _shrink_guard(abs_path, content, rel, topic_hint)
 
     with qq_lock(store):
+        if gate_check is not None:
+            gate_check()
+
         # Re-check existence UNDER the lock (2026-07-29 review, lock-3): the pre-lock checks
         # above (and the verbs' own) can be invalidated by a concurrent `qq delete` while we
         # waited for the lock — refuse cleanly instead of tracebacking on the read below.
@@ -610,14 +619,23 @@ def update(store: Store, topic: str, content: str, refs: Optional[list[str]] = N
     would otherwise proceed (non-empty content, existing target) — every refusal path stays
     identical even for gated slugs. Gated + untrusted -> the line is queued as a PROPOSED
     write, never touches the HEAD; the raised WriteGateDiverted (exit 0) also means bind_write
-    below never runs — nothing landed, so nothing binds."""
+    below never runs — nothing landed, so nothing binds. When the target does NOT exist at the
+    pre-lock check but the slug IS gated and the model untrusted, a gate_recheck closure is
+    passed to _execute_write and re-evaluated under the write lock — a concurrent `qq new`
+    that creates the topic in the window between the pre-lock check and the lock is caught
+    and diverted to the queue instead of landing."""
+    gate_recheck = None
     if content:
         content = _strip_caller_stamp(content)   # qq owns the stamp — ignore any caller timestamp
         content = _normalize_prepend_first_line(content)
         reason = authgate.gate_reason(store.config, topic)
-        if reason is not None and _gate_target_exists(store, topic):
-            _gate_divert(store, "update", topic, content, reason)
-    out = _execute_write(store, topic, content, prepend=True)
+        if reason is not None:
+            if _gate_target_exists(store, topic):
+                _gate_divert(store, "update", topic, content, reason)
+            def gate_recheck():
+                if _gate_target_exists(store, topic):
+                    _gate_divert(store, "update", topic, content, reason)
+    out = _execute_write(store, topic, content, prepend=True, gate_check=gate_recheck)
     line_ts = UpdateItem(marker=content.split("\n", 1)[0]).timestamp
     bind_write(store, topic, content, explicit=refs, line_ts=line_ts)
     return out
