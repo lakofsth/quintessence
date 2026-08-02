@@ -27,7 +27,7 @@ sys.path.insert(0, ENGINE)
 
 
 class _FakeFastMCP:
-    def __init__(self, _name, transport_security=None):
+    def __init__(self, _name, instructions=None, transport_security=None):
         pass
 
     def tool(self):

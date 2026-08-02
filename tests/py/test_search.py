@@ -845,5 +845,65 @@ class TestSearchMinSimFloor(unittest.TestCase):
             self.assertEqual(idx.last_search_floored, 0)
 
 
+class TestSearchWithStats(unittest.TestCase):
+    """`with_stats=True`: search returns `(hits, {"floored": n})`, the count carried in a
+    call-local dict so each caller gets its own number even if the shared attribute is
+    overwritten between calls. `with_stats=False` (the default) keeps the bare-list shape.
+    Direct unit coverage for the return contract itself — previously only integration-covered
+    through the MCP wiring tests."""
+
+    def test_default_shape_is_a_bare_list(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_corpus(base, n=2)
+            idx = make_index(base, QQ_SEARCH_MIN_SIM="0.0")
+            idx.embed = FakeEmbedder()
+            hits = idx.search("sentinel", k=10)
+            self.assertIsInstance(hits, list)
+
+    def test_with_stats_returns_hits_and_floored_count(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_corpus(base, n=4)
+            idx = make_index(base, QQ_SEARCH_MIN_SIM="0.99")
+            idx.embed = FakeEmbedder()
+            hits, stats = idx.search("sentinel", k=10, with_stats=True)
+            self.assertEqual(hits, [], "all four fall below a 0.99 floor")
+            self.assertEqual(stats, {"floored": 4})
+            self.assertEqual(idx.last_search_floored, 4,
+                             "the shared attribute is still written for existing callers")
+
+    def test_with_stats_floor_zero_counts_nothing(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_corpus(base, n=2)
+            idx = make_index(base, QQ_SEARCH_MIN_SIM="0.99")
+            idx.embed = FakeEmbedder()
+            hits, stats = idx.search("sentinel", k=10, min_sim=0, with_stats=True)
+            self.assertGreater(len(hits), 0)
+            self.assertEqual(stats, {"floored": 0})
+
+    def test_with_stats_on_keyword_fallback(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_corpus(base, n=2, source="docs")
+            with open(os.path.join(base, "kb", "docs", "doc0.md"), "w") as f:
+                f.write("# doc0\nxyzzy-marker unique term\n")
+            idx = make_index(base, QQ_SEARCH_MIN_SIM="0.99")
+            idx.embed = lambda text, prefix: None   # force keyword fallback
+            hits, stats = idx.search("xyzzy-marker", k=5, with_stats=True)
+            self.assertTrue(hits, "fallback hits still return under with_stats")
+            self.assertTrue(all(h.get("degraded") for h in hits))
+            self.assertEqual(stats, {"floored": 0})
+            self.assertEqual(idx.last_search_floored, 0)
+
+    def test_stats_dict_is_call_local_not_the_shared_attribute(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_corpus(base, n=4)
+            idx = make_index(base, QQ_SEARCH_MIN_SIM="0.99")
+            idx.embed = FakeEmbedder()
+            _, stats_first = idx.search("sentinel", k=10, with_stats=True)
+            idx.search("sentinel", k=10, min_sim=0)   # second call overwrites the attribute
+            self.assertEqual(idx.last_search_floored, 0)
+            self.assertEqual(stats_first, {"floored": 4},
+                             "the first call's stats must survive a later call's overwrite")
+
+
 if __name__ == "__main__":
     unittest.main()

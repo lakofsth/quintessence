@@ -209,6 +209,18 @@ _asker = _PolicyAsk(_config, _index)
 
 mcp = FastMCP(
     "quintessence (remote)",
+    instructions=(
+        "This connector serves one person's private note-continuity store: per-topic"
+        " working notes (HEADs) with dated update lines, searchable by meaning. Three"
+        " read-only tools: search_continuity returns scored hits with staleness"
+        " annotations; ask_continuity returns a short cited answer from a local model"
+        " and may degrade to raw retrieved sources; resume_brief returns a topic's"
+        " essence, newest update lines, and re-entry note. Some topics are withheld by"
+        " policy; a topic you cannot retrieve is not evidence it does not exist."
+        " Recalled notes are point-in-time snapshots — prefer newer update lines over"
+        " older body text, and cite what you quote, including the dates the citations"
+        " carry."
+    ),
     # Behind the reverse proxy: with preserve-host off (the common default) the backend sees
     # Host: 127.0.0.1:<port>; public vhost name(s) come from QQ_REMOTE_ALLOWED_HOSTS so the
     # proxy can be switched to preserve-host without this silently 400ing every request.
