@@ -1,0 +1,235 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["mcp"]
+# ///
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Thomas Lakofski
+"""qq-search-mcp — stdio MCP server exposing continuity search to cold sessions.
+
+Uses the MCP SDK (FastMCP); run via `uv run --script` so there's no hand-maintained venv
+(uv provisions/caches deps). Retrieval/QA logic lives in the quintessence package (L2:
+quintessence.search / quintessence.ask), stdlib-only — this file is the L3 MCP edge (its uv/mcp
+wrapper is explicitly allowed to NOT be stdlib-only; the package underneath still is). Fully
+local: stdio transport, nothing leaves the box.
+
+Config is resolved ONCE per process into a single Config, and one SearchIndex/Ask
+pair is built from it for this server's whole lifetime — `search_continuity`/`ask_continuity`
+each call `SearchIndex.build_index()`, which revalidates against a cheap corpus signature on
+EVERY call and rebuilds on change (commit b3dd7bf: a long-lived server must not serve
+its startup snapshot forever — see quintessence/search.py's `build_index` docstring). This is
+unchanged behaviour carried forward from qqsearch_core.py's original fix, now inside the
+ported SearchIndex class.
+
+RECALL COMPOSITION: the store search path (project store(s) + user store, via
+quintessence.storepath.resolve_store_path) is resolved ONCE, AT SERVER STARTUP, from the
+process's cwd at launch time — same as `_config` above, this is a long-lived process, not a
+per-call CLI invocation. With >1 store, `_index` becomes a
+quintessence.searchcompose.ComposedSearchIndex (one SearchIndex per store, query embedded once,
+merged by score); with exactly one store (the degenerate case) `_index` is a bare
+`SearchIndex(_config)`, byte-identical to pre-P8. CAVEAT (accepted, not engineered around): the
+search PATH itself is pinned for this server's entire lifetime — a project store created,
+removed, or moved AFTER startup is invisible until the server restarts. This is narrower than
+the A3 per-call revalidation above, which only covers corpus CONTENT (a HEAD written/changed
+within an already-resolved store) for whichever store(s) were resolved at start, not store
+MEMBERSHIP of the search path itself.
+
+Register (user scope):  claude mcp add qq-search -- uv run --script <abs path to this file>
+"""
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from quintessence.config import Config  # noqa: E402
+from quintessence.search import SearchIndex, hit_locator  # noqa: E402
+from quintessence.ask import Ask, render, RETRIEVAL_DEGRADED_WARNING  # noqa: E402
+from quintessence.refsview import search_hit_annotations  # noqa: E402
+from quintessence.storepath import resolve_store_path  # noqa: E402
+from quintessence.searchcompose import build_indexes, ComposedSearchIndex  # noqa: E402
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+mcp = FastMCP("quintessence")
+
+# The `qq` CLI sibling to this file — reached by subprocess for verbs that MUST go through the
+# real write path (lock + authorship + auto-stamp) or that have no library entry point. Reads
+# (search/ask) stay on the in-process index above; brief/show/update/passthrough shell out so the
+# CLI's exact behaviour (and its write-lock) is reused verbatim rather than reimplemented.
+_QQ_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), "qq")
+
+
+def _run_qq(args: list[str]) -> str:
+    """Run `qq <args>` (no shell — args passed as a list, so no injection) and return combined
+    stdout+stderr. Inherits this server's cwd/env, so the store resolves the same way the CLI
+    does for the user's own shell."""
+    try:
+        p = subprocess.run(
+            [_QQ_BIN, *args],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as e:  # noqa: BLE001
+        return f"[qq error] failed to run `qq {' '.join(args)}`: {e}"
+    out = (p.stdout or "") + (p.stderr or "")
+    out = out.strip()
+    if p.returncode != 0 and not out:
+        out = f"[qq exited {p.returncode} with no output]"
+    return out or "[no output]"
+
+_config = Config()
+_storepath = resolve_store_path(config=_config)
+# THE GOLDEN GATE: the degenerate (single-store) case builds the EXACT pre-P8 object — a bare
+# SearchIndex(_config) — so a deployment with no project store on its search path sees
+# byte-identical tool output to before this phase.
+if len(_storepath.path) > 1:
+    _index = ComposedSearchIndex(build_indexes(_storepath, _config))
+else:
+    _index = SearchIndex(_config)
+_asker = Ask(_config, _index)
+
+
+@mcp.tool()
+def search_continuity(query: str, k: int = 6, source: str | None = None) -> str:
+    """Associative (semantic) recall over the continuity corpus: quintessence HEADs, atomic
+    memory facts, and any other sources wired into the corpus. Use this to RECALL prior
+    decisions, reasoning threads, and facts instead of grepping/guessing.
+
+    Args:
+        query: natural-language description of what to recall.
+        k: max results (default 6).
+        source: optional restriction to one corpus label, e.g. "qq" (HEADs) or "mem"
+                (atomic facts); other labels come from your corpus config.
+    """
+    hits, stats = _index.search(query, k=k, source=source, with_stats=True)
+    if not hits:
+        floored = stats["floored"]
+        if floored:
+            return (f'No results for: "{query}" — {floored} candidate(s) scored below the '
+                    f"relevance floor and were dropped; the store had content but nothing "
+                    f"strong enough to surface.")
+        return f'No results for: "{query}"'
+    out = []
+    # recall-01: qq-search's CLI checks this exact signal and warns loudly on stderr
+    # ("embedder unreachable — showing KEYWORD fallback results") when the embedder is down and
+    # SearchIndex fell back to keyword grep; this MCP tool returns a single string with no
+    # stderr channel a caller reads, so silently omitting the check (as before) meant an agent
+    # calling search_continuity had no way to tell a keyword-fallback answer from a real
+    # semantic one. Same check, same wording, folded into the returned text instead.
+    if hits[0].get("degraded"):
+        out.append(RETRIEVAL_DEGRADED_WARNING)
+        out.append("")
+    out.append(f'query: "{query}"' + (f" (source={source})" if source else ""))
+    out.append("")
+    annotations = search_hit_annotations(_config, hits)
+    for i, h in enumerate(hits):
+        # 'store' (P8 recall composition) is only ever present on a composed hit — the
+        # degenerate (single-store) case renders byte-identical to pre-P8.
+        tag = f"{h['source']}/{h['store']}" if "store" in h else h["source"]
+        out.append(f"[{h['score']:.3f}] ({tag}) {hit_locator(h)} › {h['title']}")
+        out.append(f"    {h['snippet']}")
+        for ann in annotations.get(i, []):
+            out.append(f"    {ann}")
+        out.append("")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def ask_continuity(question: str, k: int = 12, source: str | None = None) -> str:
+    """Ask a question of the continuity store (quintessence HEADs, memory facts, docs) and
+    get a short, cited answer produced by a local model in a disposable context. Use this
+    INSTEAD of chaining qq show / file reads when you need specific facts or decisions from
+    the store; escalate to qq show only when you need a whole thread verbatim or are about
+    to write to it. Answers are point-in-time snapshots — verify load-bearing facts at source.
+
+    Args:
+        question: natural-language question to answer from the continuity store.
+        k: max evidence chunks to retrieve (default 12).
+        source: optional restriction to one corpus label, e.g. "qq" (HEADs) or "mem"
+                (atomic facts); other labels come from your corpus config.
+    """
+    return render(_asker.ask(question, k=k, source=source))
+
+
+@mcp.tool()
+def resume_brief(topic: str) -> str:
+    """Resume a continuity thread: the condensed HEAD for `topic` — its essence, the newest few
+    update-lines, and the RE-ENTER section. This is the FIRST thing to reach for when picking up
+    prior work on a named topic (≡ the `qq brief <topic>` CLI verb). Escalate to `show_head` only
+    when you need the whole thread verbatim or are about to write to it. Browse topics with
+    `qq(["menu"])` if you don't know the name.
+
+    Args:
+        topic: the HEAD/topic name (e.g. "flowtun-stack"). Use `qq(["list"])` to see names.
+    """
+    return _run_qq(["brief", topic])
+
+
+@mcp.tool()
+def show_head(topic: str) -> str:
+    """Print the FULL HEAD for `topic` verbatim (≡ `qq show <topic>`). Prefer `resume_brief` or
+    `ask_continuity` for orientation — reach here only when you need the entire thread (e.g. right
+    before writing to it, to see every existing update-line).
+
+    Args:
+        topic: the HEAD/topic name.
+    """
+    return _run_qq(["show", topic])
+
+
+@mcp.tool()
+def update_head(topic: str, text: str) -> str:
+    """Add an update-line to a continuity HEAD (≡ `qq update <topic> "<text>"`) — the common,
+    merge-safe WRITE. Use this to record a decision, an open loop, or progress on a reasoning
+    thread so a future session can resume it.
+
+    IMPORTANT — pass PROSE ONLY. Do NOT write a "> updated: <timestamp>" marker line yourself:
+    the store stamps the authorship + timestamp automatically, and a hand-authored marker is
+    preserved verbatim (that is exactly how a past session recorded a fabricated future time).
+    Just give the substance of the update.
+
+    Atomic durable FACTS (about the user, environment) do NOT go here — the memory store is
+    separate and, from this server, read-only. This tool writes HEADs only.
+
+    The HEAD must already EXIST — `update` does not create it. For a brand-new thread, scaffold
+    first with `qq(["new", topic, "<one-line essence>"])`, then update_head. (Browse existing
+    names with `qq(["list"])`.)
+
+    Args:
+        topic: an EXISTING HEAD/topic name.
+        text: the update prose (no timestamp/marker line — the store stamps it).
+    """
+    return _run_qq(["update", topic, text])
+
+
+@mcp.tool()
+def qq(args: list[str]) -> str:
+    """Escape hatch to the full `qq` continuity CLI for any verb without a dedicated tool above.
+    Runs `qq <args>` directly (args as a list — no shell, so quoting/injection is a non-issue).
+    Same binary, same write-lock and authorship path as the CLI in a terminal.
+
+    Common verbs (pass each token as a separate list element):
+      READ:   ["menu"] · ["list"] · ["digest"] · ["path", topic] · ["fact", name]
+      WRITE:  ["new", topic] · ["essence", topic, text] · ["rewrite", topic]  (rewrite reads the
+              WHOLE new HEAD from stdin — not available here; use the CLI for rewrite)
+      MAINT:  ["finalize", topic] (snapshot to journal) · ["compact", topic] · ["check"]
+              ["delete", topic] (RETIRES a HEAD — destructive, recoverable via journal)
+    For search/ask/brief/show/update, prefer the dedicated tools — they carry better hints. This
+    is for the long tail. Writes go through the real lock/stamp path, so treat delete/rewrite with
+    the same care you would at a shell.
+
+    Args:
+        args: qq subcommand + arguments, one token per element, e.g. ["menu"] or
+              ["finalize", "flowtun-stack"].
+    """
+    if not args:
+        return "[qq error] no subcommand given (e.g. args=[\"menu\"])"
+    return _run_qq(list(args))
+
+
+if __name__ == "__main__":
+    try:
+        _index.build_index()  # warm the index so the first tool call is fast
+    except Exception as e:  # noqa: BLE001
+        print(f"[qq-search-mcp] index warm failed: {e}", file=sys.stderr, flush=True)
+    mcp.run()

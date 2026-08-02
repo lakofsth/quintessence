@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git identity (the suite makes commits)
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+
+      - name: Run test suite
+        run: bash tests/run.sh < /dev/null
+
+  # The python side of the engine, incl. the CONFIG.md parity test (a documented setting that
+  # drifts from the KEYS registry fails here). Its own job so it uses a provisioned python
+  # rather than the runner's externally-managed system one.
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pytest
+
+      - name: Configure git identity (some tests commit in a throwaway store)
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+
+      - name: Run python tests
+        run: python -m pytest tests/py -q
+
+  # The plugin and marketplace manifests, validated by the same CLI that consumes them.
+  # `plugin validate` is a local manifest check — no account or network state involved.
+  plugin-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate the plugin + marketplace manifests
+        run: claude plugin validate . --strict
+
+  # Cold install: what a stranger does — fresh $HOME, setup.sh, then a real
+  # write/read/finalize cycle. This is the decoupled-from-the-author's-setup proof,
+  # continuously re-run; the test suite above exercises the engine, not the install.
+  cold-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git identity (qq init makes commits)
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+
+      - name: Cold install into a fresh HOME
+        run: |
+          export HOME="$RUNNER_TEMP/fresh-home"
+          mkdir -p "$HOME"
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+          bash setup.sh
+          export PATH="$HOME/.local/bin:$PATH"
+          qq doctor
+          qq new smoke-topic "cold-install smoke thread"
+          qq update smoke-topic "one update-line from CI"
+          qq brief smoke-topic | grep -q "one update-line from CI"
+          qq finalize smoke-topic
+          qq list | grep -q smoke-topic

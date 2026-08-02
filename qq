@@ -1,0 +1,798 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Thomas Lakofski
+"""qq — the quintessence CLI dispatcher (the strangler front door).
+
+This is the FRONT DOOR — and since P9 (the release-gate legacy port) the WHOLE door: the read
+verbs (menu/digest/findings/list/show/brief/path/help), the check-family verbs
+(check/reconcile/waveoff), the write path's verbs (update/essence/new/rewrite/
+finalize/checkpoint/save, + compact/delete/rm/reindex, P9), and the setup/diagnostic
+trio (doctor/config/init -> quintessence.admin, P9) are all rendered natively by
+quintessence.cli / quintessence.write / quintessence.admin on top of the package's L0/L1/L2
+objects. `search`/`ask` are direct-exec'd straight to `qq-search`/`qq-ask` — see
+`_DIRECT_EXEC`'s comment for the grounded env-leak bug behind that shape (historical: the
+bootstrap it dodged was qq-legacy's, but the direct-exec is the right shape regardless).
+
+The original all-bash engine (`qq-legacy`, plus the standalone `qq-write` binary) served as
+the strangler host and whole-engine rollback throughout the port; both were purged from the
+tree when the port completed (P9) and live in git history. The store format and the `.qq.lock`
+discipline are unchanged, so any historical engine from git history still interoperates.
+"""
+from __future__ import annotations
+
+import os
+import re
+import sys
+from typing import Optional
+
+ENGINE = os.path.dirname(os.path.realpath(__file__))   # engine dir (qq may be symlinked from ~/bin)
+sys.path.insert(0, ENGINE)
+
+from quintessence import cli  # noqa: E402  (path must be set up first)
+from quintessence.checks import Checks, persist_findings  # noqa: E402
+from quintessence.config import Config  # noqa: E402
+from quintessence.findings import Finding, FindingsFile  # noqa: E402
+from quintessence.reconcile import Reconcile  # noqa: E402
+from quintessence.search import SearchIndex  # noqa: E402
+from quintessence.slugs import SlugResolver  # noqa: E402
+from quintessence.store import Store, CompositeStore, StorePathError  # noqa: E402
+from quintessence.storepath import resolve_store_path  # noqa: E402
+from quintessence.xref import Xref  # noqa: E402
+from quintessence import write as writemod  # noqa: E402
+from quintessence import admin as adminmod  # noqa: E402
+from quintessence import authgate  # noqa: E402
+
+
+def _load_redact_entries(path: str) -> list:
+    """Load the withheld-topics list, same parse as search.py's _redact_entries."""
+    try:
+        with open(path) as f:
+            raw = f.read().splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in raw:
+        ln = re.sub(r"\s+#.*$", "", ln).strip()
+        if ln and not ln.startswith("#"):
+            out.append(ln)
+    return out
+
+
+def _topic_redacted(topic: str, entries: list) -> bool:
+    """Does `topic` match a withheld-topics entry?  Trailing '*' = prefix match,
+    else exact slug match — the same matching the search-side redaction uses for
+    a bare slug (no path-substring branch, since show/brief targets are always slugs)."""
+    base = topic.rsplit("/", 1)[-1]
+    if base.endswith(".md"):
+        base = base[:-3]
+    for e in entries:
+        if e.endswith("*"):
+            if base.startswith(e[:-1]):
+                return True
+        elif base == e:
+            return True
+    return False
+
+
+def _show_redact_gate(config, cmd: str, topics: list, unredacted: bool) -> list:
+    """Withheld-topics refusal for show/brief on a limited reader session.  Returns
+    the list of topics that are ALLOWED to render.  For each refused topic, prints a
+    refusal to stderr naming the topic and the override.  A full-access reader, an
+    unconfigured install, and a lifted override all pass through unchanged."""
+    if unredacted or config.get_bool("QQ_SHOW_UNREDACTED"):
+        return topics
+    redact_file = config.get_path("QQ_REDACT_FILE")
+    entries = _load_redact_entries(redact_file)
+    if not entries:
+        return topics
+    mode = authgate.model_mode(config)
+    if mode == "opus":
+        return topics
+    allowed = []
+    for t in topics:
+        if _topic_redacted(t, entries):
+            print(f"qq {cmd}: '{t}' is on the withheld-topics list and this session's "
+                  f"reader profile ({mode}) does not have full access – refusing to "
+                  f"render. Override: qq {cmd} {t} --unredacted  or  "
+                  f"QQ_SHOW_UNREDACTED=1 qq {cmd} {t}", file=sys.stderr)
+        else:
+            allowed.append(t)
+    return allowed
+
+
+# Verbs this dispatcher renders itself — since P9, every verb the engine has. Anything else
+# is a genuinely unknown command, rendered as this dispatcher's own usage error (legacy's
+# case-*) fallback did the same job when it was on the dispatch path).
+NATIVE_VERBS = {
+    "menu", "index", "digest", "findings", "list", "show", "load", "brief", "path", "fact",
+    "help", "-h", "--help",
+    "check", "reconcile", "waveoff", "memdir",
+    "update", "essence", "new", "rewrite", "finalize", "save", "checkpoint",
+    "reindex", "compact", "delete", "rm",
+    "doctor", "init", "config",
+}
+
+# search/ask (recall composition): these two are ALREADY fully owned by the python
+# engine (quintessence.search/quintessence.ask via qq-search/qq-ask) and are direct-exec'd here
+# instead of relayed through qq-legacy's `search)`/`ask)` cases (which are themselves nothing
+# but `exec "$ENGINE/qq-search" "$@"`/`exec "$ENGINE/qq-ask" "$@"` — a pure pass-through).
+# GROUNDED BUG this fixes (found while building P8's parity test): qq-legacy sources
+# qq-config.sh on EVERY invocation, and qq-config.sh's `_qq_load_config` EXPORTS every
+# dotenv-config-file key — including QUINTESSENCE_DIR — into the process environment for its
+# OWN internal use ("env wins: set only if not already set") before ever reaching the
+# `search)`/`ask)` case. That export then leaks into the exec'd qq-search/qq-ask CHILD's
+# environment as a genuine env var, and quintessence.storepath.resolve_store_path can no longer
+# tell a FILE-recorded QUINTESSENCE_DIR (must NOT pin — `qq init` records
+# the user store there and per-project discovery must keep running) from a real env pin —
+# silently disabling multi-store composition for every `qq search`/`qq ask` call that went
+# through qq-legacy. Direct-execing skips qq-legacy's bootstrap entirely, so the artifact export
+# never happens; qq-search/qq-ask resolve their own Config from the UNTOUCHED process
+# environment, exactly as a direct `qq-search`/`qq-ask` invocation always has.
+_DIRECT_EXEC = {"search": "qq-search", "ask": "qq-ask"}
+
+
+def _findings_file(config: Config) -> FindingsFile:
+    path = os.path.join(config.get_path("QQ_STATE_DIR"), "pending-findings.md")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return FindingsFile.parse(fh.read())
+    except OSError:
+        return FindingsFile()
+
+
+def _cmd_check(config: Config, store: Store, resolver_store, args: list[str]) -> int:
+    """Port of qq-legacy `check)`: fast T1 (quintessence.checks + quintessence.reconcile,
+    merged into the TIER1 section) first, then the slow T2 xref (quintessence.xref).
+
+    In `--write` mode, the flag-only "[T1 index] ... run `qq reindex`" finding
+    `Checks.tier1_findings()` always produces (checks.py stays L2/read-only by design — see its
+    module docstring) is substituted here for the REAL git-tree auto-fix attempt
+    (`quintessence.write.index_autofix_finding`, the ONE sanctioned auto-fix `qq check --write`
+    performs) — matching run_check's own section 7, which only reindexes+commits when `write`
+    mode is active. The substitution is by Finding identity (cls="T1 index", kind="stale"), not
+    position, so it's correct regardless of where run_check's own emission order puts it."""
+    write = any(a in ("--write", "-w") for a in args)
+    skip_xref = config.get_bool("QQ_XREF_DISABLE") or any(a in ("--fast", "--no-xref") for a in args)
+
+    # The FILE-checks (head-meta, mem-health, MEMORY.md bijection) run over `store` —
+    # the write-target (project) store, checking its OWN files. But link resolution uses
+    # `resolver_store` — the COMPOSITE read view — so a project HEAD's `[[user-topic]]` link
+    # resolves against the whole search path instead of being false-flagged as unresolved
+    # (project shadows user in the composite's deduped slug set, so no false ambiguity either).
+    # Degenerate: resolver_store IS store, so this is byte-identical to pre-P5.
+    resolver = SlugResolver(resolver_store)
+    findings = Checks(config, store, resolver).tier1_findings()
+    if write:
+        replaced: list[Finding] = []
+        for f in findings:
+            if f.cls == "T1 index" and f.fields.get("kind") == "stale":
+                fixed = writemod.index_autofix_finding(store)
+                if fixed is not None:
+                    replaced.append(fixed)
+            else:
+                replaced.append(f)
+        findings = replaced
+    findings += [Finding(cls="T1 config-drift", text=ln)
+                 for ln in Reconcile(config).run(commit=write)]
+    tier1_lines = [f.render() for f in findings]
+
+    # None = xref skipped OR failed (both are indistinguishable to qq-legacy's own caller — a
+    # transient embedder outage produces no stdout before the exception, exactly like a
+    # deliberate --fast skip); a list (possibly empty) = it ran to completion.
+    xref_lines: Optional[list[str]] = None
+    if not skip_xref:
+        try:
+            xref_lines = [f.render() for f in Xref(config, SearchIndex(config)).finding_records()]
+        except Exception:
+            # Matches qq-legacy: `xout="$(staleness-xref.py)" && xok=1` — ANY nonzero exit
+            # (embedder down, index incomplete, etc.) is indistinguishable from "produced
+            # nothing" to the caller; --write leaves the XREF section untouched (xref_lines
+            # stays None), never silently clearing real findings on a transient failure.
+            xref_lines = None
+
+    if write:
+        persist_findings(store, tier1_lines, xref_lines)
+        path = os.path.join(config.get_path("QQ_STATE_DIR"), "pending-findings.md")
+        xcount = len(xref_lines) if xref_lines is not None else None
+        sys.stdout.write(cli.render_check_write_summary(len(tier1_lines), xcount, path))
+    else:
+        sys.stdout.write(cli.render_check_readonly(tier1_lines, xref_lines or [], skip_xref))
+    return 0
+
+
+def _cmd_reconcile(config: Config, args: list[str]) -> int:
+    """Port of qq-legacy `reconcile)`: config-drift only, read-only by default. The friendlier
+    top-level "no registry" message is qq-legacy's own (distinct from Reconcile.run's internal
+    --explain-only diagnostic, which stays silent without --explain)."""
+    reconcile = Reconcile(config)
+    if not reconcile.registry or not os.path.isfile(reconcile.registry):
+        print("qq reconcile: no registry (set QQ_RECONCILE_REGISTRY to an INI) – nothing to check.")
+        return 0
+    for line in reconcile.run(explain="--explain" in args, commit="--commit-snapshot" in args):
+        print(line)
+    return 0
+
+
+def _cmd_waveoff(config: Config, args: list[str]) -> int:
+    """Port of qq-legacy `waveoff)`: adjudicate a [T2 stale?] pair (or bulk-clear a HEAD's)."""
+    xref = Xref(config, SearchIndex(config))
+    if args and args[0] == "--head":
+        if len(args) < 2:
+            print("usage: qq waveoff --head <head-topic> [--all]", file=sys.stderr)
+            return 1
+        try:
+            print(xref.waveoff_head_all(args[1]))
+        except RuntimeError as e:
+            # PRE-EXISTING wart, discovered (not introduced) by this P4 wiring: bulk waveoff
+            # needs the embedding index (unlike the single-pair path below), so an
+            # embedder-down/empty-corpus RuntimeError from Xref.pair_sims would otherwise
+            # surface as a raw Python traceback here — staleness-xref.py's own standalone CLI
+            # has the identical gap (verified: same uncaught RuntimeError, same traceback).
+            # Flagged for review; degrading to a clean message here rather than propagating.
+            print(f"qq waveoff --head: {e}", file=sys.stderr)
+            return 1
+        return 0
+    if len(args) != 2:
+        print("usage: qq waveoff <memory> <head>  |  qq waveoff --head <head> [--all]", file=sys.stderr)
+        return 2
+    try:
+        print(xref.waveoff(args[0], args[1]))
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+def _read_stdin_text() -> str:
+    """Raw stdin, decoded UTF-8/errors=replace — matches how the rest of the package already
+    treats store text (heads.py/store.py's own convention); qq-write itself is byte-agnostic
+    (`cat > "$tmp"`), but every downstream consumer here (Head parsing, the H1/shrink-guard
+    comparisons) works on `str`."""
+    return sys.stdin.buffer.read().decode("utf-8", errors="replace")
+
+
+def _consume_prepend_flags(rest: list[str]) -> "Optional[tuple[list[str], list[str]]]":
+    """Port of qq-legacy `update)`'s own flag-scanning loop: tolerate a leaked
+    `--prepend-update` (an internal qq-write flag some old habits still pass — a no-op here,
+    `update` always prepends), `--` ends scanning (everything after is literal text, even if it
+    starts with dashes), any OTHER `--*` is a hard error (rather than silently becoming literal
+    text while real stdin is discarded — the exact bug class test-write-surface.sh guards), and
+    a bare (non `--`-prefixed) word stops scanning — it and everything after is the text.
+    Returns None (having already printed the error) on the hard-error case.
+
+    B1 addition: `--ref kind:id` / `--ref=kind:id` (repeatable, reality binding's explicit-ref
+    flag) is consumed here too — flag-position only, so a `--ref` after `--` stays literal text
+    per the existing contract. Returns (text_args, ref_args)."""
+    refs: list[str] = []
+    i = 0
+    n = len(rest)
+    while i < n:
+        a = rest[i]
+        if a == "--prepend-update":
+            i += 1
+            continue
+        if a == "--ref":
+            if i + 1 >= n:
+                print("qq update: --ref needs a value (kind:id)", file=sys.stderr)
+                return None
+            refs.append(rest[i + 1])
+            i += 2
+            continue
+        if a.startswith("--ref="):
+            refs.append(a[len("--ref="):])
+            i += 1
+            continue
+        if a == "--":
+            return rest[i + 1:], refs
+        if a.startswith("--"):
+            print(f"qq update: unexpected flag '{a}' – usage: qq update <topic> \"text\"  "
+                  f"|  echo text | qq update <topic>  (use -- before text starting with --)",
+                  file=sys.stderr)
+            return None
+        break
+    return rest[i:], refs
+
+
+def _consume_ref_flags(rest: list[str], verb: str) -> "Optional[tuple[list[str], list[str]]]":
+    """Leading `--ref kind:id` / `--ref=kind:id` flags for the verbs that don't share update's
+    flag loop (essence/new/rewrite). Flag-position only, same as every other write-verb flag;
+    a valueless `--ref` is a usage error (argv malformation, not a binding failure — fail-soft
+    starts INSIDE bind_write, not at the command line). Returns (remaining_args, refs), or
+    None after printing the error."""
+    refs: list[str] = []
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--ref":
+            if i + 1 >= len(rest):
+                print(f"qq {verb}: --ref needs a value (kind:id)", file=sys.stderr)
+                return None
+            refs.append(rest[i + 1])
+            i += 2
+            continue
+        if a.startswith("--ref="):
+            refs.append(a[len("--ref="):])
+            i += 1
+            continue
+        break
+    return rest[i:], refs
+
+
+def _cmd_update(store: Store, args: list[str]) -> int:
+    if not args:
+        # JUDGMENT CALL (flagged for review): legacy's `${1:?usage: ...}` exits 1 with a
+        # bash-internal diagnostic (embeds ITS OWN line number, not meaningful ported verbatim);
+        # every other usage error in THIS dispatcher (show/brief/path/waveoff, and essence/new/
+        # rewrite/finalize below) already uses exit 2 with a clean message — matched here for
+        # consistency within the python dispatcher rather than replicating a bash artifact.
+        print("usage: qq update <topic> [text...]", file=sys.stderr)
+        return 2
+    topic, rest = args[0], args[1:]
+    consumed = _consume_prepend_flags(rest)
+    if consumed is None:
+        return 2
+    text_args, refs = consumed
+    content = " ".join(text_args) + "\n" if text_args else _read_stdin_text()
+    try:
+        sys.stdout.write(writemod.update(store, topic, content, refs=refs))
+    except writemod.WriteError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+    return 0
+
+
+def _cmd_essence(store: Store, args: list[str]) -> int:
+    if not args:
+        print("usage: qq essence <topic> <text...>", file=sys.stderr)
+        return 2
+    topic, rest = args[0], args[1:]
+    consumed = _consume_ref_flags(rest, "essence")
+    if consumed is None:
+        return 2
+    rest, refs = consumed
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    elif rest and rest[0].startswith("--"):
+        print(f"qq essence: unexpected flag '{rest[0]}' – usage: qq essence <topic> <text...>  "
+              f"(use -- before text starting with --)", file=sys.stderr)
+        return 2
+    if not rest:
+        print("usage: qq essence <topic> <text...>", file=sys.stderr)
+        return 2
+    try:
+        sys.stdout.write(writemod.essence(store, topic, " ".join(rest), refs=refs))
+    except writemod.WriteError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+    return 0
+
+
+def _cmd_new(store: Store, args: list[str]) -> int:
+    if not args:
+        print("usage: qq new <topic> [essence text...]", file=sys.stderr)
+        return 2
+    topic, rest = args[0], args[1:]
+    consumed = _consume_ref_flags(rest, "new")
+    if consumed is None:
+        return 2
+    rest, refs = consumed
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    elif rest and rest[0].startswith("--"):
+        print(f"qq new: unexpected flag '{rest[0]}' – usage: qq new <topic> [essence text...]  "
+              f"(use -- before text starting with --)", file=sys.stderr)
+        return 2
+    try:
+        sys.stdout.write(writemod.new(store, topic, " ".join(rest), refs=refs))
+    except writemod.WriteError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+    return 0
+
+
+def _cmd_rewrite(store: Store, args: list[str]) -> int:
+    if not args:
+        print("usage: qq rewrite <topic> < full_content", file=sys.stderr)
+        return 2
+    topic = args[0]
+    rest = args[1:]
+    allow_future = False
+    if "--allow-future" in rest:
+        allow_future = True
+        rest = [a for a in rest if a != "--allow-future"]
+    consumed = _consume_ref_flags(rest, "rewrite")
+    if consumed is None:
+        return 2
+    _, refs = consumed   # any OTHER further argv is silently ignored, matching qq-legacy's own case
+    content = _read_stdin_text()
+    try:
+        sys.stdout.write(writemod.rewrite(store, topic, content, refs=refs, allow_future=allow_future))
+    except writemod.WriteError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+    return 0
+
+
+def _cmd_finalize(store: Store, args: list[str]) -> int:
+    if not args:
+        print("usage: qq finalize <topic>", file=sys.stderr)
+        return 2
+    topic = args[0]   # any further argv is silently ignored, matching qq-legacy's own case
+    try:
+        sys.stdout.write(writemod.finalize(store, topic))
+    except writemod.WriteError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+    return 0
+
+
+def _cmd_reindex(store: Store) -> int:
+    sys.stdout.write(writemod.reindex(store))
+    return 0
+
+
+def _cmd_delete(store: Store, args: list[str]) -> int:
+    if not args:
+        print("usage: qq delete <topic>", file=sys.stderr)
+        return 2
+    topic = args[0]   # any further argv is silently ignored, matching qq-legacy's own case
+    try:
+        sys.stdout.write(writemod.delete(store, topic))
+    except writemod.WriteError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+    return 0
+
+
+def _cmd_compact(store: Store, args: list[str]) -> int:
+    if not args:
+        print("usage: qq compact <topic> [keep-N=5]", file=sys.stderr)
+        return 2
+    topic = args[0]
+    n_raw = args[1] if len(args) > 1 else "5"
+    try:
+        keep_n = int(n_raw)
+    except ValueError:
+        # JUDGMENT CALL (flagged for review): legacy passed keep-N to awk UNVALIDATED — a
+        # non-numeric N coerces to 0 in awk's `keep=(u<=N)` and silently drops EVERY
+        # update-line (while the `[ "$ul" -le "$n" ]` short-circuit errors past itself under
+        # set -e semantics). That's a data-losing bash artifact, not a behavior to reproduce;
+        # refused here with the dispatcher's usual clean exit-2 usage error.
+        print(f"qq compact: keep-N must be an integer (got '{n_raw}') – "
+              f"usage: qq compact <topic> [keep-N=5]", file=sys.stderr)
+        return 2
+    try:
+        sys.stdout.write(writemod.compact(store, topic, keep_n))
+    except writemod.WriteError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+    return 0
+
+
+def _delegate_direct(cmd: str, args: list[str]) -> "None":
+    """search/ask: exec qq-search/qq-ask DIRECTLY (see _DIRECT_EXEC's comment for why this must
+    NOT go through qq-legacy) — same argv shape qq-legacy's own `search)`/`ask)` cases would
+    have passed (cmd's own argv[0] already stripped), UNTOUCHED environment (no env= override:
+    the whole point is that qq-search/qq-ask see the real process environment, not one qq-legacy
+    has mutated)."""
+    target = os.path.join(ENGINE, _DIRECT_EXEC[cmd])
+    try:
+        os.execv(target, [target] + args)
+    except OSError as e:
+        print(f"qq: cannot exec {_DIRECT_EXEC[cmd]} ({target}): {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+# Per-verb usage lines — shown for `qq <verb> -h/--help` and when a dash-token is refused in an
+# object slot. Full `cli.render_usage()` is the fallback for verbs without a specific line here.
+_VERB_USAGE = {
+    "menu": "usage: qq menu",
+    "digest": "usage: qq digest",
+    "findings": "usage: qq findings [next]",
+    "list": "usage: qq list",
+    "show": "usage: qq show <topic> [topic2 ...] [--unredacted]",
+    "load": "usage: qq load <topic> [topic2 ...] [--unredacted]",
+    "brief": "usage: qq brief <topic> [topic2 ...] [--unredacted]",
+    "path": "usage: qq path <topic>",
+    "fact": "usage: qq fact <name>",
+    "memdir": "usage: qq memdir [--global]",
+    "check": "usage: qq check [--write] [--fast]",
+    "reconcile": "usage: qq reconcile [--explain]",
+    "waveoff": "usage: qq waveoff <memory> <head> [--head <head>]",
+    "update": "usage: qq update <topic> [text...]     (stdin if no text; `--ref kind:id` after topic)",
+    "essence": "usage: qq essence <topic> <text...>",
+    "new": "usage: qq new <topic> [essence]",
+    "rewrite": "usage: qq rewrite <topic>              (whole file on stdin; `--allow-future` to override)",
+    "finalize": "usage: qq finalize <topic>            (alias: checkpoint, save)",
+    "checkpoint": "usage: qq checkpoint <topic>          (alias: finalize, save)",
+    "save": "usage: qq save <topic>                (alias: finalize, checkpoint)",
+    "reindex": "usage: qq reindex",
+    "compact": "usage: qq compact <topic> [N]",
+    "delete": "usage: qq delete <topic>              (alias: rm)",
+    "rm": "usage: qq rm <topic>                  (alias: delete)",
+    "doctor": "usage: qq doctor",
+    "init": "usage: qq init [dir]",
+    "config": "usage: qq config [show | get <KEY> | set <KEY> <VALUE> | path]",
+}
+
+# Verbs whose FIRST positional is an object (topic/name/dir) — a leading `-`/`--` there is a
+# mistyped flag, never a real object. (admin init/config are guarded separately, before the
+# --global strip.) Verbs that legitimately take a flag/subcommand FIRST are deliberately absent:
+# check/reconcile/findings/digest/... and waveoff (its bulk form is `waveoff --head <head>`).
+_OBJECT_FIRST_STORE = {
+    "update", "essence", "new", "rewrite", "finalize", "save", "checkpoint",
+    "delete", "rm", "compact", "path", "show", "load", "brief", "fact",
+}
+
+# Admin verbs whose FIRST positional may legitimately be a flag. `qq init --project` is the
+# only one: it must stay reachable, or project stores become uncreatable.
+_ADMIN_FIRST_FLAGS = {
+    "init": ("--project",),
+}
+
+
+def verb_help(cmd: str) -> str:
+    """Per-verb usage line (for `qq <verb> --help` / a refused dash-object); full usage as fallback."""
+    u = _VERB_USAGE.get(cmd)
+    return (u + "\n") if u else cli.render_usage()
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    cmd = argv[0] if argv else "menu"
+    args = argv[1:] if argv else []
+
+    if cmd not in NATIVE_VERBS:
+        if cmd in _DIRECT_EXEC:
+            _delegate_direct(cmd, args)   # search/ask: straight to qq-search/qq-ask, never qq-legacy
+        # Unknown command: same shape + exit code as legacy's `*)` case (message, usage to
+        # stderr, exit 2) — rendered natively; qq-legacy is off every dispatch path since P9.
+        print(f"qq: unknown command '{cmd}'", file=sys.stderr)
+        sys.stderr.write(cli.render_usage())
+        return 2
+
+    if cmd in ("help", "-h", "--help"):
+        sys.stdout.write(cli.render_usage())
+        return 0
+
+    # A `-h`/`--help` anywhere in a verb's ARGUMENTS (before any `--` text separator) is a help
+    # request for that verb, not a topic/dir/value — render its help instead of letting the verb
+    # swallow it as a positional (the `qq init --help` footgun, and the same for every verb).
+    sep_h = args.index("--") if "--" in args else len(args)
+    if any(a in ("-h", "--help") for a in args[:sep_h]):
+        sys.stdout.write(verb_help(cmd))
+        return 0
+
+    # A `-`/`--`-prefixed token in an OBJECT slot (dir / subcommand for the admin verbs here) is a
+    # mistyped flag, never a real object — refuse it rather than, e.g., create a store dir named
+    # "--help". Store verbs are guarded the same way after the --global strip (below).
+    # `init --project` is a REAL first-position flag, so it is exempt —
+    # without this the guard refuses the only supported way to create a project store.
+    if cmd in ("init", "config") and args and args[0].startswith("-") \
+            and args[0] not in _ADMIN_FIRST_FLAGS.get(cmd, ()):
+        _obj = "directory" if cmd == "init" else "subcommand"
+        print(f"qq {cmd}: '{args[0]}' looks like a command-line flag, not a {_obj} – refusing to "
+              f"treat it as one.", file=sys.stderr)
+        sys.stderr.write(verb_help(cmd))
+        return 2
+
+    # doctor/config/init (quintessence.admin): dispatched BEFORE the --global strip and store
+    # resolution — they operate on the CONFIG layer (or scaffold a store that doesn't exist
+    # yet), never on a resolved store, and their argv must arrive untouched (a `config set`
+    # VALUE containing "--global" is data, not a routing flag). Matches legacy, where these
+    # three delegated straight through with no store context.
+    if cmd == "doctor":
+        rc, text = adminmod.doctor(Config(), ENGINE)
+        sys.stdout.write(text)
+        return rc
+
+    if cmd == "init":
+        try:
+            out, err = adminmod.init(Config(), args)
+        except adminmod.AdminError as e:
+            print(str(e), file=sys.stderr)
+            return e.exit_code
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+        return 0
+
+    if cmd == "config":
+        rc, out, err = adminmod.config_cmd(Config(), args)
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+        return rc
+
+    # `--global`/`-g`: force the user store — reach the shared user-level
+    # store explicitly from inside a project. A new flag, so stripping it can't change any
+    # existing invocation; a no-op when there is no project store (user == write-target).
+    # The strip STOPS at the first `--`: everything after it is literal text by the write verbs'
+    # own documented contract ("use -- before text starting with --"), so a `--global`/`-g`
+    # there must be recorded, not swallowed as the flag.
+    sep = args.index("--") if "--" in args else len(args)
+    global_flag = any(a in ("--global", "-g") for a in args[:sep])
+    args = [a for a in args[:sep] if a not in ("--global", "-g")] + args[sep:]
+
+    # `--unredacted` for show/load/brief: lifts the withheld-topics refusal for a limited
+    # reader session.  Stripped here (before the object-first guard) so it doesn't look like
+    # a mistyped topic.
+    unredacted_flag = False
+    if cmd in ("show", "load", "brief") and "--unredacted" in args:
+        unredacted_flag = True
+        args = [a for a in args if a != "--unredacted"]
+
+    # Object-slot dash guard for store verbs: with --global/-g stripped, a leading `-`/`--` in the
+    # topic position is a mistyped flag (--ref/--allow-future are flag-position args AFTER the
+    # topic). Refuse rather than create/act on a HEAD named "--foo". `--` still introduces literal text.
+    if cmd in _OBJECT_FIRST_STORE and args and args[0].startswith("-"):
+        print(f"qq {cmd}: '{args[0]}' looks like a command-line flag, not a topic – refusing to "
+              f"treat it as one.", file=sys.stderr)
+        sys.stderr.write(verb_help(cmd))
+        return 2
+
+    config = Config()
+    # Multi-store resolution. SINGLE-STORE PATH IS BYTE-IDENTICAL TO PRE-P2: we build a
+    # bare Store(config) and route every verb to it, exactly as before. Only a genuine >=2-store
+    # search path (a project store discovered on the walk-up) activates composition.
+    storepath = resolve_store_path(config=config)
+    if len(storepath.path) == 1:
+        store = write_store = user_store = Store(config)
+        read_store = store
+    else:
+        # A project store keeps its atomic-fact memory under its own root
+        # (<project>/.quintessence/memory); the user store uses the Config QQ_MEMDIR.
+        stores = [Store(config, qdir=loc.qdir,
+                        memdir=(loc.memdir if loc.kind == "project" else None))
+                  for loc in storepath.path]
+        write_store = stores[0]          # most-specific: write target + LIST/digest scope
+        user_store = stores[-1]          # the shared user store (search-path tail)
+        read_store = CompositeStore(stores)   # FETCH verbs resolve across the whole path
+        store = write_store
+        if global_flag:                  # --global: everything against the user store
+            store = write_store = read_store = user_store
+
+    if cmd in ("menu", "index"):
+        sys.stdout.write(cli.render_menu(store))
+        return 0
+
+    if cmd == "digest":
+        sys.stdout.write(cli.render_digest(store, config, _findings_file(config)))
+        return 0   # ratified deviation from qq-legacy — see cli.render_digest's docstring
+
+    if cmd == "findings":
+        sub = args[0] if args else ""
+        if sub == "next":
+            sys.stdout.write(cli.render_findings_next(store, config, _findings_file(config)))
+            return 0
+        if sub in ("", "list"):
+            sys.stdout.write(cli.render_findings_list(_findings_file(config)))
+            return 0
+        print("usage: qq findings [next|list]", file=sys.stderr)
+        return 2
+
+    if cmd == "list":
+        # union slug dump across the search path (tooling surface); menu/digest stay
+        # project-scoped as the human orientation surfaces.
+        sys.stdout.write(cli.render_list(read_store))
+        return 0
+
+    if cmd == "path":
+        if not args:
+            print("usage: qq path <topic>", file=sys.stderr)
+            return 2
+        # FETCH verb: resolve the named topic across the search path (project shadows user).
+        sys.stdout.write(cli.render_path(read_store, args[0]))
+        return 0
+
+    if cmd == "memdir":
+        # write-target store's memory dir (project's <root>/.quintessence/memory inside a project,
+        # else the user QQ_MEMDIR); --global forces the user store. store == write_store here.
+        sys.stdout.write(cli.render_memdir(store))
+        return 0
+
+    if cmd == "fact":
+        # READ-ONLY viewer for an atomic memory fact (the `qq fact <name>` a search hit shows).
+        # Distinct from `show` (HEADs) so the model never generalises to `qq update <fact>`.
+        if not args:
+            print("usage: qq fact <name>", file=sys.stderr)
+            return 2
+        sys.stdout.write(cli.render_fact(store, args[0]))
+        return 0
+
+    if cmd in ("show", "load"):
+        if not args:
+            print("usage: qq show <topic> [topic2 ...] [--unredacted]", file=sys.stderr)
+            return 2
+        allowed = _show_redact_gate(config, cmd, args, unredacted_flag)
+        if allowed:
+            sys.stdout.write(cli.render_show(read_store, allowed))
+        return 0 if allowed == args else 1
+
+    if cmd == "brief":
+        if not args:
+            print("usage: qq brief <topic> [topic2 ...] [--unredacted]", file=sys.stderr)
+            return 2
+        allowed = _show_redact_gate(config, "brief", args, unredacted_flag)
+        if allowed:
+            sys.stdout.write(cli.render_brief(read_store, allowed))
+        return 0 if allowed == args else 1
+
+    if cmd == "check":
+        return _cmd_check(config, store, read_store, args)
+
+    if cmd == "reconcile":
+        return _cmd_reconcile(config, args)
+
+    if cmd == "waveoff":
+        return _cmd_waveoff(config, args)
+
+    # Cross-store write guard (multi-store): a write verb targets ONLY the write store, but the
+    # fetch verbs compose — so "qq show <topic> works, qq update <topic> fails/creates" is the
+    # trap in the gap. Worst case is `rewrite`, whose REPLACE mode has no missing-file guard: it
+    # would silently CREATE a project-local fork that then shadows the user HEAD for every read
+    # here. Refuse with the two real options instead. Inert in the degenerate case and under
+    # --global (write_store IS read_store, the condition can't hold).
+    # delete/rm/compact joined this guard when they went native (P9): as STORE_SCOPED_LEGACY
+    # delegates they were env-pinned to the project store and failed with a bare "no HEAD" —
+    # same refuse-don't-act outcome, now with the guard's two-real-options message. (reindex
+    # takes no topic, so it routes like list/digest: the write store, nothing to guard.)
+    if cmd in ("update", "essence", "rewrite", "finalize", "save", "checkpoint",
+               "delete", "rm", "compact") and args:
+        topic = args[0]
+        if not write_store.has_head(topic) and read_store.has_head(topic):
+            print(f"qq {cmd}: HEAD '{topic}' exists in the user store, not in this project's "
+                  f"store.", file=sys.stderr)
+            print(f"  write it there instead:      qq {cmd} {topic} ... --global", file=sys.stderr)
+            print(f"  or start a project HEAD:     qq new {topic}   "
+                  f"(shadows the user HEAD for reads here)", file=sys.stderr)
+            return 1
+
+    if cmd == "update":
+        return _cmd_update(store, args)
+
+    if cmd == "essence":
+        return _cmd_essence(store, args)
+
+    if cmd == "new":
+        # Deliberate creation is allowed to shadow — but say so, once, at creation time.
+        if args and not write_store.has_head(args[0]) and read_store.has_head(args[0]):
+            print(f"qq new: note – '{args[0]}' also exists in the user store; the new project "
+                  f"HEAD will shadow it for reads inside this project (--global reaches the "
+                  f"user one).", file=sys.stderr)
+        return _cmd_new(store, args)
+
+    if cmd == "rewrite":
+        return _cmd_rewrite(store, args)
+
+    if cmd in ("finalize", "save", "checkpoint"):
+        return _cmd_finalize(store, args)
+
+    if cmd == "reindex":
+        return _cmd_reindex(store)
+
+    if cmd in ("delete", "rm"):
+        return _cmd_delete(store, args)
+
+    if cmd == "compact":
+        return _cmd_compact(store, args)
+
+    raise AssertionError(f"unreachable: {cmd!r} in NATIVE_VERBS with no handler")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except StorePathError as e:
+        # Traversal guard (store.py): a `../`-shaped topic reaching a read verb (show/brief/path)
+        # or essence/finalize surfaces here — the write verbs already return 2 via their own
+        # WriteError handling. Clean exit 2, never a traceback.
+        print(str(e), file=sys.stderr)
+        sys.exit(2)
+    except BrokenPipeError:
+        # A native verb's output piped into something that closes early (`qq menu | head`,
+        # `qq digest | head -1`, a hook capturing partial output) must die quietly, matching
+        # qq-legacy's bash behavior under the SAME SIGPIPE (bash just exits 141, no message) —
+        # not a Python traceback + exit 1. Redirect stdout to /dev/null first so the
+        # interpreter's own shutdown-time flush doesn't raise a SECOND BrokenPipeError.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)   # 128 + SIGPIPE(13), the exit code a SIGPIPE-killed process reports

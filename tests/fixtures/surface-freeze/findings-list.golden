@@ -1,0 +1,2 @@
+- [T1 link] 2 unresolved [[link]](s) (may be intentional to-write markers): foo, bar
+- [T2 stale?] memory betamem (2026-01-01) vs HEAD beta (updated 2026-06-01T00:00:00Z, sim 0.71) – verify the memory's claims against the HEAD; edit or wave off (`qq waveoff betamem beta`).

@@ -1,0 +1,12 @@
+# runtime state — never tracked / never shipped
+*.log
+__pycache__/
+*.pyc
+.prederive/
+pending-findings.md
+.xref-waveoffs
+.audit-baseline
+.audit-memory-manifest
+.qq.lock
+# the embedding cache is derived + large
+embeddings.json

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "quintessence",
+  "description": "Quintessence — session-continuity store for AI agents.",
+  "owner": { "name": "Thomas Lakofski" },
+  "plugins": [
+    {
+      "name": "quintessence",
+      "source": "./",
+      "description": "Session-continuity store for AI agents: durable per-topic HEADs + journal, semantic recall, and a consistency checker. Bundles the write-path hooks and a /quintessence skill.",
+      "version": "0.1.0",
+      "author": { "name": "Thomas Lakofski" },
+      "category": "productivity"
+    }
+  ]
+}
