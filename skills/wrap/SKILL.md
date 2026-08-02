@@ -10,9 +10,11 @@ you work*, `/wrap` is the end-of-session sweep that finalizes them and ties off 
 the store through `qq <verb>` on PATH (never edit the store or run git in it directly). Run the
 steps, then report concisely.
 
-1. **Finalize HEADs** – `qq finalize <topic>` (alias: `checkpoint`) for each HEAD worked this
-   session, which snapshots it to the journal. If unsure which, check `qq digest` or recent
-   activity.
+1. **Finalize HEADs** – for each HEAD worked this session: first reconcile its essence – the
+   essence is the most-retrieved, least-maintained line in the store, so if the session's
+   updates outdated it, `qq essence <topic> "<text>"` before snapshotting. Then `qq finalize
+   <topic>` (alias: `checkpoint`), which snapshots it to the journal. If unsure which HEADs,
+   check `qq digest` or recent activity.
 2. **Consistency** – run `qq check`; surface any non-trivial findings (ignore known, intentional
    to-write `[[link]]` markers – a link to a HEAD you mean to write later is not an error).
    If findings are pending, resolve at least one before closing; `qq findings next` gives

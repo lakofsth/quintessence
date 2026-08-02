@@ -33,8 +33,9 @@ GREEN = "flowtun-stack"
 
 
 class _FakeFastMCP:
-    def __init__(self, _name, transport_security=None):
+    def __init__(self, _name, instructions=None, transport_security=None):
         self._registered = []
+        self.instructions = instructions
 
     def tool(self):
         def deco(fn):
@@ -1057,6 +1058,23 @@ class TestRemoteAskCitationPaths(unittest.TestCase):
                     break
             else:
                 self.fail("citation line not found in output")
+
+
+class TestServerInstructions(unittest.TestCase):
+    """Pin the MCP-level self-description: the instructions field must exist, name all
+    three tools, and state the withheld-topics caveat."""
+
+    def test_instructions_field_present_and_complete(self):
+        with tempfile.TemporaryDirectory() as home:
+            ns, _, _ = _wired_ns(home)
+            instructions = ns["mcp"].instructions
+            self.assertIsNotNone(instructions, "FastMCP instructions must be set")
+            self.assertIsInstance(instructions, str)
+            for tool_name in ("search_continuity", "ask_continuity", "resume_brief"):
+                self.assertIn(tool_name, instructions,
+                              f"instructions must mention tool {tool_name!r}")
+            self.assertIn("withheld", instructions,
+                          "instructions must state the withheld-topics caveat")
 
 
 if __name__ == "__main__":
