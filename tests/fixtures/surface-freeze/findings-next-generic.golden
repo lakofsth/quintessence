@@ -1,0 +1,4 @@
+- [T1 link] 2 unresolved [[link]](s) (may be intentional to-write markers): foo, bar
+
+to resolve:
+  or: edit the source file directly, then re-run: qq check --write

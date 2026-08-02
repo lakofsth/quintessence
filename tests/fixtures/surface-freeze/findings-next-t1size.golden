@@ -1,0 +1,6 @@
+- [T1 size] HEAD alpha: update-lines 40kB / 20 lines → `qq compact alpha` (folds old update-lines to the journal, keeps newest ~5 + the body; `qq brief` reads it meanwhile)
+
+HEAD alpha: 173 bytes total, 1 update-lines
+
+to resolve:
+  qq compact alpha

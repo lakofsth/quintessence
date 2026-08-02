@@ -1,0 +1,448 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["mcp", "uvicorn"]
+# ///
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Thomas Lakofski
+"""qq-remote-mcp — the HOSTED remote face of the continuity store (streamable-HTTP MCP).
+
+Design source: the `qq-remote-connector` HEAD (decisions D1-D10). Sibling of `qq-search-mcp`,
+which stays exactly as it is: stdio, local, full tool set, for Claude Code on this box. THIS
+server is the one that hosted surfaces (claude.ai web / Cowork / desktop / mobile, D7) reach
+through an SSH reverse tunnel to a jump host and a reverse-proxy vhost firewalled to Anthropic's egress
+range (D2/D6).
+
+WHY A SEPARATE FILE AND NOT A `--transport` FLAG ON qq-search-mcp (deviation from design v1,
+ruled in the build session): FastMCP registers tools at DECORATOR time, so a flag-mode server
+still HAS `update_head` and the `qq` passthrough (which reaches `qq delete` / `qq rewrite`) in
+its tool table, and D3's read-only Phase 1 becomes a runtime conditional — one bad env var from
+exposing a write verb to the internet. A file that never DEFINES those tools cannot serve them,
+whatever the config says. Structure is the boundary; this is D4's own reasoning applied to the
+read path.
+
+D3 — THE EXPOSED TOOL SET IS THREE READ VERBS: search / ask / brief. No `show_head` (a full-HEAD
+dump widens blast radius for little resume value; it returns in Phase 2 once the deny hoist has
+soaked), no `qq` passthrough (it reaches every verb, including destructive ones), no `update_head`
+(Phase 1 is read-only, green-first — the write path is D4's problem and is not built here).
+
+D3's blocking dependency, discharged: every read verb goes through quintessence.remotepolicy,
+which fails CLOSED. `search` filters its hits; `brief` is gated on the topic BEFORE the CLI is
+invoked; `ask` runs through _PolicyAsk below, which overrides Ask.filter_redacted so the policy
+executes INSIDE ask's own retrieve->filter->floor pipeline — a remote answer therefore cannot
+cite a denied source. The local `QQ_ASK_UNREDACTED` escape hatch is structurally disabled:
+_PolicyAsk.__init__ forces the flag off and resets the shared index's lifted state, so the
+server's index is never mutated by the local hatch regardless of env/config on the box.
+
+D10 — THE BEARER TOKEN SELECTS THE PROFILE. Two tokens, two profiles: the standard token serves
+axis A + axis B (withheld topics AND crown jewels denied); the wide token lifts axis A
+only, for when the operator knows the surface is not serving a limited reader. Axis B —
+what must never leave the box — is liftable by neither. See quintessence/remotepolicy.py.
+
+D5 — GPU-contention latency is ACCEPTED as best-effort in Phase 1 and MEASURED, not engineered
+around: `ask` embeds and completes against local models that may be queued behind a training run
+(a ~10-minute queue was observed live). The per-call audit log below records wall-clock for every
+call so the real hosted-timeout behaviour is a measurement rather than a guess. If it bites, a
+CPU-fallback embedder is the contained follow-up.
+
+Run:  qq-remote-mcp [--host 127.0.0.1] [--port 8766]
+"""
+import argparse
+import contextvars
+import hmac
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from quintessence.config import Config  # noqa: E402
+from quintessence.search import SearchIndex  # noqa: E402
+from quintessence.ask import Ask, render  # noqa: E402
+from quintessence.refsview import search_hit_annotations  # noqa: E402
+from quintessence.storepath import resolve_store_path  # noqa: E402
+from quintessence.searchcompose import build_indexes, ComposedSearchIndex  # noqa: E402
+from quintessence.remotepolicy import (  # noqa: E402
+    PROFILE_STANDARD,
+    PROFILE_WIDE,
+    PROFILES,
+    DenyListUnavailable,
+    RemotePolicy,
+    is_safe_topic,
+)
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
+import uvicorn  # noqa: E402
+
+# The profile for the request currently being served, set by the auth middleware from the bearer
+# token. A ContextVar (not a global) because the ASGI app is concurrent: two surfaces may be
+# mid-call at once and must not see each other's profile.
+_profile: contextvars.ContextVar[str] = contextvars.ContextVar("qq_remote_profile",
+                                                               default=PROFILE_STANDARD)
+
+_QQ_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), "qq")
+DENIED = ("[denied] That topic is not served on this connector. It exists but is withheld by the "
+          "remote deny policy — read it from a local session.")
+
+
+def audit(event: str, **fields) -> None:
+    """One line per call to stderr -> journald. The remote face is the only surface where a
+    request did not originate from the operator at a keyboard, so every call is logged: who
+    (profile), what verb, and how long (D5's latency measurement). search and brief additionally
+    log whether the policy withheld or denied content."""
+    kv = " ".join(f"{k}={v}" for k, v in fields.items())
+    print(f"[qq-remote] {event} {kv}", file=sys.stderr, flush=True)
+
+
+# ---- policy-bound Ask ---------------------------------------------------------------------
+class _PolicyAsk(Ask):
+    """Ask with the remote deny policy substituted for the local redaction filter.
+
+    Overriding `filter_redacted` (rather than filtering ask's OUTPUT) puts the policy inside the
+    pipeline ask already runs — retrieve -> filter -> A7 floor -> complete. A denied HEAD is thus
+    dropped from the evidence pack before a completion endpoint ever sees it, so it can be neither
+    quoted nor cited nor paraphrased into the answer. Filtering afterwards would have removed the
+    citation while leaving the content in the prose.
+
+    The local `QQ_ASK_UNREDACTED` escape hatch is structurally disabled here (overridden
+    filter_redacted). The search-side redaction filter is LIFTED (including on inner indexes
+    when composed) so that RemotePolicy is the sole filtering authority — otherwise the search
+    layer's axis-A entries would shadow the WIDE profile's documented lift of that axis."""
+
+    def __init__(self, config: Config, search_index: SearchIndex):
+        super().__init__(config, search_index)
+        self.unredacted = False
+        if search_index is not None:
+            search_index.redact_lifted = True
+            if isinstance(search_index, ComposedSearchIndex):
+                for _loc, idx in search_index.indexes:
+                    idx.redact_lifted = True
+
+    def filter_redacted(self, hits: list) -> list:
+        return RemotePolicy(self.config, profile=_profile.get()).filter_hits(hits)
+
+
+_REMOTE_BANNER = "point-in-time snapshot — verify load-bearing facts at source"
+
+_REMOTE_RETRIEVAL_WARNING = (
+    "⚠ embedder unreachable — showing keyword fallback results.")
+
+
+def _sanitize_for_remote(result: dict) -> dict:
+    """Strip internal infrastructure detail before rendering for the remote face."""
+    result = dict(result)
+    if result.get("degraded"):
+        result["answer"] = "QA unavailable — raw retrieval only."
+    result["retrieval_degraded"] = False
+    if "sources" in result:
+        result["sources"] = [dict(s) for s in result["sources"]]
+        for s in result["sources"]:
+            src = str(s.get("source", "")).split("/", 1)[0]
+            p = s.get("path", "")
+            if src in ("qq", "mem"):
+                slug = os.path.basename(p)
+                if slug.endswith(".md"):
+                    slug = slug[:-3]
+                s["path"] = slug
+            else:
+                s["path"] = os.path.basename(p)
+    return result
+
+
+_BRIEF_HEADER_LOCAL_RE = re.compile(r"; full: qq show [^)]+")
+_QQ_VERB_RE = re.compile(r"\bqq\s+(\w+)")
+_ABS_PATH_RE = re.compile(r"(?<![\w/])(/[\w._-]+){2,}")
+
+
+def _sanitize_brief_for_remote(text: str) -> str:
+    """Strip the brief header's local-command reference (verb-specific)."""
+    return _BRIEF_HEADER_LOCAL_RE.sub("", text)
+
+
+def _sanitize_outward(text: str) -> str:
+    """The single choke point: strip local filesystem paths and local command
+    references from ANY outward-bound string, regardless of which verb produced it."""
+    text = _QQ_VERB_RE.sub(r"\1", text)
+    text = text.replace("~/", "")
+    text = _ABS_PATH_RE.sub(lambda m: os.path.basename(m.group(0)), text)
+    return text
+
+
+def _remote_hit_locator(hit: dict) -> str:
+    """Remote-safe identifier for a search hit — no local commands, no filesystem paths.
+
+    For qq/mem sources, returns the slug (the topic or fact name) — the caller can pass it to
+    resume_brief or search_continuity to dig deeper.  For other sources, returns the
+    store-relative path (the hit's ``path`` value as-is, which is already HOME-relative like
+    ``kb/quintessence/topic.md``)."""
+    src = str(hit.get("source", "")).split("/", 1)[0]
+    if src in ("qq", "mem"):
+        slug = os.path.basename(hit.get("path", ""))
+        if slug.endswith(".md"):
+            slug = slug[:-3]
+        return slug
+    return hit.get("path", "")
+
+
+def _run_qq(args: list[str]) -> str:
+    """Run `qq <args>` (argument LIST — no shell) and return its output. Reads only: the remote
+    face never passes a write verb, and the only caller below passes a policy-approved topic to
+    the `brief` verb. Raises on failure — the caller owns auditing."""
+    try:
+        p = subprocess.run([_QQ_BIN, *args], capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        raise RuntimeError(str(e)) from e
+    if p.returncode != 0:
+        raise RuntimeError(f"rc={p.returncode} {(p.stderr or '').strip()[:200]}")
+    return (p.stdout or "").strip() or "[no output]"
+
+
+_config = Config()
+_storepath = resolve_store_path(config=_config)
+if len(_storepath.path) > 1:
+    _index = ComposedSearchIndex(build_indexes(_storepath, _config))
+else:
+    _index = SearchIndex(_config)
+_asker = _PolicyAsk(_config, _index)
+
+mcp = FastMCP(
+    "quintessence (remote)",
+    # Behind the reverse proxy: with preserve-host off (the common default) the backend sees
+    # Host: 127.0.0.1:<port>; public vhost name(s) come from QQ_REMOTE_ALLOWED_HOSTS so the
+    # proxy can be switched to preserve-host without this silently 400ing every request.
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*",
+                       *_config.get("QQ_REMOTE_ALLOWED_HOSTS")],
+        allowed_origins=list(_config.get("QQ_REMOTE_ALLOWED_ORIGINS")),
+    ),
+)
+
+
+@mcp.tool()
+def search_continuity(query: str, k: int = 6, source: str | None = None) -> str:
+    """Associative (semantic) recall over the operator's continuity corpus: quintessence HEADs (reasoning
+    threads / decision state), atomic memory facts, and wired-in docs. Use this to RECALL prior
+    decisions and context instead of guessing or asking them to repeat themselves.
+
+    Args:
+        query: natural-language description of what to recall.
+        k: max results (default 6).
+        source: optional corpus label, e.g. "qq" (HEADs) or "mem" (atomic facts).
+    """
+    t0 = time.monotonic()
+    try:
+        policy = RemotePolicy(_config, profile=_profile.get())
+        hits, stats = _index.search(query, k=k, source=source, with_stats=True)
+        floored_count = stats["floored"]
+        kept = policy.filter_hits(hits)
+        if not kept:
+            if floored_count:
+                result = (f'No results for: "{query}" — {floored_count} candidate(s) scored below '
+                          f"the relevance floor and were dropped; the store had content but "
+                          f"nothing strong enough to surface.")
+            else:
+                result = f'No results for: "{query}"'
+        else:
+            out = [f'query: "{query}"' + (f" (source={source})" if source else ""), ""]
+            annotations = search_hit_annotations(_config, kept)
+            for i, h in enumerate(kept):
+                tag = f"{h['source']}/{h['store']}" if "store" in h else h["source"]
+                out.append(f"[{h['score']:.3f}] ({tag}) {_remote_hit_locator(h)} › {h['title']}")
+                out.append(f"    {h['snippet']}")
+                for ann in annotations.get(i, []):
+                    out.append(f"    {ann}")
+                out.append("")
+            result = "\n".join(out)
+        audit("search", profile=_profile.get(), k=k, hits=len(hits), withheld=len(hits) - len(kept),
+              ms=int((time.monotonic() - t0) * 1000))
+        return _sanitize_outward(result)
+    except Exception as e:  # noqa: BLE001
+        audit("search_error", profile=_profile.get(), detail=str(e),
+              ms=int((time.monotonic() - t0) * 1000))
+        return _sanitize_outward("[search error] query failed — detail logged server-side")
+
+
+@mcp.tool()
+def ask_continuity(question: str, k: int = 12, source: str | None = None) -> str:
+    """Ask a question of the operator's continuity store and get a short, CITED answer, produced by a
+    local model reading the retrieved evidence. Prefer this over search when you want specific
+    facts or decisions rather than a list of places to look. Answers are point-in-time snapshots —
+    verify load-bearing facts at source.
+
+    Args:
+        question: natural-language question to answer from the store.
+        k: max evidence chunks to retrieve (default 12).
+        source: optional corpus label, e.g. "qq" (HEADs) or "mem" (atomic facts).
+    """
+    t0 = time.monotonic()
+    try:
+        result = _asker.ask(question, k=k, source=source)
+        retrieval_degraded = result.get("retrieval_degraded", False)
+        raw_degraded = bool(result.get("degraded"))
+        raw_endpoint = result.get("endpoint")
+        raw_n_sources = len(result.get("sources", []))
+        result = _sanitize_for_remote(result)
+        answer = render(result, banner=_REMOTE_BANNER)
+        if retrieval_degraded:
+            answer = _REMOTE_RETRIEVAL_WARNING + "\n\n" + answer
+        audit("ask", profile=_profile.get(), k=k, sources=raw_n_sources,
+              degraded=raw_degraded, endpoint=raw_endpoint,
+              ms=int((time.monotonic() - t0) * 1000))
+        return _sanitize_outward(answer)
+    except Exception as e:  # noqa: BLE001
+        audit("ask_error", profile=_profile.get(), detail=str(e),
+              ms=int((time.monotonic() - t0) * 1000))
+        return _sanitize_outward("[ask error] query failed — detail logged server-side")
+
+
+@mcp.tool()
+def resume_brief(topic: str) -> str:
+    """Resume a continuity thread: the condensed HEAD for `topic` — its essence, newest update
+    lines, and its RE-ENTER section. Reach for this FIRST when picking up prior work on a named
+    topic. Find topic names with `search_continuity`.
+
+    Args:
+        topic: the HEAD/topic name (e.g. "flowtun-stack").
+    """
+    t0 = time.monotonic()
+    try:
+        policy = RemotePolicy(_config, profile=_profile.get())
+        # Gate BEFORE the CLI runs: the deny check must not be a filter over content already read.
+        if policy.topic_denied(topic):
+            audit("brief", profile=_profile.get(), topic=topic if is_safe_topic(topic) else "<unsafe>",
+                  denied=1, ms=int((time.monotonic() - t0) * 1000))
+            return _sanitize_outward(DENIED)
+        # The CLI reader gate protects an interactive limited reader;
+        # remote access is governed by profile — lifting it here keeps
+        # the remote policy as the sole authority (same as the ask path).
+        out = _run_qq(["brief", "--unredacted", topic])
+        out = _sanitize_brief_for_remote(out)
+        audit("brief", profile=_profile.get(), topic=topic, denied=0, bytes=len(out),
+              ms=int((time.monotonic() - t0) * 1000))
+        return _sanitize_outward(out)
+    except Exception as e:  # noqa: BLE001
+        audit("brief_error", profile=_profile.get(), detail=str(e),
+              ms=int((time.monotonic() - t0) * 1000))
+        return _sanitize_outward("[brief error] command failed — detail logged server-side")
+
+
+# ---- auth: the bearer token IS the profile selector (D10) ----------------------------------
+def load_tokens(path: str) -> dict[str, str]:
+    """Parse the token file: lines of `<profile> <token>`, '#' comments, blanks skipped.
+
+    Refuses (raises) rather than degrades: a token file that is group/other-readable, missing a
+    profile, carrying a short token, or reusing the same secret for both profiles is a
+    misconfiguration that would quietly weaken the boundary, so it stops the server instead. An
+    ABSENT or unreadable token file is the same class of thing (nothing to auth against is not
+    a green light) and gets the same worded refusal, not a raw traceback.
+    """
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        raise SystemExit(f"[qq-remote] refusing to start: can't read {path} "
+                         f"({e.strerror or e}) — create it (one `<profile> <token>` line per "
+                         f"profile) or fix its permissions")
+    if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise SystemExit(f"[qq-remote] refusing to start: {path} is group/other-accessible "
+                         f"(mode {stat.S_IMODE(st.st_mode):04o}); chmod 600 it")
+    tokens: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = list(f)
+    except OSError as e:
+        raise SystemExit(f"[qq-remote] refusing to start: can't read {path} ({e.strerror or e})")
+    for ln in lines:
+        ln = ln.split("#", 1)[0].strip()
+        if not ln:
+            continue
+        parts = ln.split()
+        if len(parts) != 2 or parts[0] not in PROFILES:
+            raise SystemExit(f"[qq-remote] refusing to start: bad line in {path} "
+                             f"(want `<{'|'.join(PROFILES)}> <token>`)")
+        tokens[parts[0]] = parts[1]
+    for prof in PROFILES:
+        if prof not in tokens:
+            raise SystemExit(f"[qq-remote] refusing to start: no `{prof}` token in {path}")
+        if len(tokens[prof]) < 32:
+            raise SystemExit(f"[qq-remote] refusing to start: `{prof}` token is shorter than 32 "
+                             f"chars — generate with `openssl rand -hex 32`")
+    if hmac.compare_digest(tokens[PROFILE_STANDARD], tokens[PROFILE_WIDE]):
+        raise SystemExit("[qq-remote] refusing to start: standard and wide tokens are identical — "
+                         "the wide profile would then be reachable by the standard credential, "
+                         "which is the entire boundary D10 puts between them")
+    return tokens
+
+
+def profile_for(header: str | None, tokens: dict[str, str]) -> str | None:
+    """Constant-time match of a bearer header to a profile. None = reject."""
+    if not header or not header.startswith("Bearer "):
+        return None
+    presented = header[len("Bearer "):].strip()
+    match = None
+    for prof in PROFILES:  # compare against BOTH, always, so timing can't reveal which one hit
+        if hmac.compare_digest(presented, tokens[prof]):
+            match = prof
+    return match
+
+
+def auth_wrapper(app, tokens: dict[str, str]):
+    """Pure-ASGI gate in front of the MCP app. Lifespan and any non-HTTP scope pass through
+    untouched (the inner app's session manager needs its lifespan); every HTTP request must carry
+    a recognised bearer token, and the token it carries selects the deny profile for that call."""
+    async def wrapped(scope, receive, send):
+        if scope["type"] != "http":
+            return await app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        prof = profile_for(headers.get("authorization"), tokens)
+        if prof is None:
+            audit("reject", reason="bad-or-missing-bearer", path=scope.get("path", ""))
+            await send({"type": "http.response.start", "status": 401,
+                        "headers": [(b"content-type", b"text/plain"),
+                                    (b"www-authenticate", b"Bearer")]})
+            await send({"type": "http.response.body", "body": b"unauthorized\n"})
+            return
+        token = _profile.set(prof)
+        try:
+            return await app(scope, receive, send)
+        finally:
+            _profile.reset(token)
+    return wrapped
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="quintessence remote MCP face (read-only)")
+    ap.add_argument("--host", default=os.environ.get("QQ_REMOTE_HOST", "127.0.0.1"))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("QQ_REMOTE_PORT", "8766")))
+    ap.add_argument("--token-file", default=os.environ.get(
+        "QQ_REMOTE_TOKEN_FILE",
+        os.path.join(os.path.expanduser("~"), ".config", "quintessence", "remote-tokens")))
+    args = ap.parse_args()
+
+    # Fail LOUDLY at boot, not silently at request time: a deploy whose deny lists are missing
+    # would deny every request (safe) while looking like an empty store (confusing).
+    for prof in PROFILES:
+        try:
+            RemotePolicy(_config, profile=prof).preflight()
+        except DenyListUnavailable as e:
+            raise SystemExit(f"[qq-remote] refusing to start: {e}")
+    tokens = load_tokens(args.token_file)
+
+    if args.host not in ("127.0.0.1", "::1", "localhost"):
+        # The only intended path in is the SSH reverse tunnel (D6). Binding a public interface
+        # would put the store on the internet with the bearer as the ONLY layer, discarding both
+        # the secret path and the vhost's Anthropic-egress firewall.
+        audit("warn", msg=f"binding non-loopback host {args.host} — the design expects the tunnel")
+
+    try:
+        _index.build_index()  # warm the index so the first hosted call isn't a cold build
+    except Exception as e:  # noqa: BLE001
+        audit("warn", msg=f"index warm failed: {e}")
+    audit("start", host=args.host, port=args.port, tools="search,ask,brief", profiles=len(PROFILES))
+    uvicorn.run(auth_wrapper(mcp.streamable_http_app(), tokens),
+                host=args.host, port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

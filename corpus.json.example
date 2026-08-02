@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to <corpus-root>/.qq-corpus.json (or set QQ_CORPUS_CONFIG). All keys optional; merged over built-in defaults. 'shortlabel' maps a source dir name to a short recall label; 'whole' lists dirs indexed as whole files (atomic facts) rather than header-split; 'exclude' adds path-substring excludes.",
+  "shortlabel": { "my-project": "proj", "notes": "n" },
+  "whole": ["facts"],
+  "exclude": ["/scratch/", "/archive/"]
+}

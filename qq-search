@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Thomas Lakofski
+"""qq-search — associative (semantic) recall over the qq HEADs + local docs (CLI).
+
+Thin terminal front-end over quintessence.search.SearchIndex (this script owns argv
+parsing and rendering only; a single Config is resolved once per invocation and threaded down —
+no module-import-time environ reads). The continuity layer has no index, so cold sessions grep
+instead of RECALL ("resume is not associative"); this is that index. Same engine is exposed to
+cold sessions as an MCP tool via qq-search-mcp.
+
+RECALL COMPOSITION: this script resolves its own store search path (cwd walk-up, same
+resolver `qq` uses) EVERY invocation. With a project store on the path, it composes ONE
+SearchIndex per store (quintessence.searchcompose), embeds the query once, and merges by score —
+each hit's rendered "(source)" tag gains a "/store" suffix (e.g. "(qq/project)") ONLY in that
+composed case. THE GOLDEN GATE: with no project store on the path (e.g. running from $HOME) or
+under --global/-g, this is byte-identical to pre-P8 — a bare SearchIndex(config), no store tag,
+nothing from quintessence.searchcompose even imported into that branch's execution.
+
+  qq-search "did we decide how the deploy rollback works?"
+  qq-search -k 8 "the database migration plan"
+  qq-search -s qq "the central open question"            # restrict to a source label (qq|mem|...)
+  qq-search --reindex "..."
+  qq-search -g "..."                                     # force the user store only (skip project
+                                                          #   discovery/composition even if present)
+"""
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from quintessence.config import Config  # noqa: E402
+from quintessence.search import SearchIndex, hit_locator, hit_realpath  # noqa: E402
+from quintessence.storepath import resolve_store_path  # noqa: E402
+from quintessence.searchcompose import build_indexes, composed_search  # noqa: E402
+
+
+def _flagval(args, i):
+    """Value for the flag at args[i]; a clean one-liner (not a traceback) when it's missing."""
+    if i + 1 >= len(args):
+        sys.exit(f"qq-search: {args[i]} requires a value (see --help)")
+    return args[i + 1]
+
+
+def main():
+    import json
+    args = sys.argv[1:]
+    k, source, reindex, as_json, force_global, q = 6, None, False, False, False, []
+    i = 0
+    while i < len(args):
+        if args[i] in ("-h", "--help", "help"):
+            print(__doc__); return
+        elif args[i] in ("-k", "--k"):
+            v = _flagval(args, i)
+            try:
+                k = int(v)
+            except ValueError:
+                sys.exit(f"qq-search: {args[i]} expects an integer, got {v!r}")
+            i += 2
+        elif args[i] in ("-s", "--source"):
+            source = _flagval(args, i); i += 2
+        elif args[i] == "--reindex":
+            reindex = True; i += 1
+        elif args[i] == "--json":
+            as_json = True; i += 1
+        elif args[i] in ("-g", "--global"):
+            force_global = True; i += 1
+        else:
+            q.append(args[i]); i += 1
+    query = " ".join(q).strip()
+    if not query:
+        print(__doc__); return
+
+    config = Config()
+    # THE GOLDEN GATE: composition only ever activates for a genuine >=2-store path, and never
+    # under -g/--global. Every other branch below is EXACTLY the pre-P8 single-index code path.
+    composed = False
+    if not force_global:
+        storepath = resolve_store_path(config=config)
+        composed = len(storepath.path) > 1
+
+    if not composed:
+        idx = SearchIndex(config)
+        if reindex:
+            idx.build_index(force=True)
+        hits = idx.search(query, k=k, source=source)
+        probe = idx.probe_embedder
+    else:
+        indexes = build_indexes(storepath, config)
+        if reindex:
+            for _loc, ix in indexes:
+                ix.build_index(force=True)
+        hits = composed_search(indexes, query, k=k, source=source)
+        probe = indexes[0][1].probe_embedder
+
+    if hits and hits[0].get("degraded"):
+        print("⚠ embedder unreachable — showing KEYWORD fallback results (run `qq doctor`).", file=sys.stderr)
+    elif not hits:
+        ok, detail = probe()
+        if not ok:
+            print(f"⚠ no results, and embedder {detail}", file=sys.stderr)
+    if as_json:
+        keys = ("score", "source", "path", "title", "snippet") + (("store",) if composed else ())
+        # 'path' is resolved to the ORIGINAL file outside the ~/kb farm (never the kb/ index path).
+        print(json.dumps([{**{kk: h[kk] for kk in keys}, "path": hit_realpath(h)} for h in hits]))
+        return
+    print(f'\nquery: "{query}"' + (f"  (source={source})" if source else "") + "\n")
+    for h in hits:
+        tag = f"{h['source']}/{h['store']}" if composed else h["source"]
+        # locator = `qq show <slug>` for a HEAD, else the original file path — the thing to run/open.
+        print(f"  [{h['score']:.3f}] ({tag}) {hit_locator(h)} › {h['title']}")
+        print(f"          {h['snippet']}\n")
+
+
+if __name__ == "__main__":
+    main()

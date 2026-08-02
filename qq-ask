@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Thomas Lakofski
+"""qq-ask — retrieval-as-QA over the qq HEADs + local docs (CLI).
+
+Thin terminal front-end over quintessence.ask.Ask. Single-shot RAG: retrieves the
+top-k full chunks via quintessence.search, hands them to a local completion endpoint under a
+grounded-or-refuse system prompt, and prints a cited answer. Degrades to raw qq-search snippets
+(never hard-fails) if no completion endpoint is healthy. Same engine is exposed to cold sessions
+as an MCP tool via qq-search-mcp (ask_continuity) — that MCP tool stays STORE-ONLY
+(--transcripts is a CLI-only opt-in, never wired into ask_continuity).
+
+  qq-ask "which model is the code-local-turbo default and at what context?"
+  qq-ask -k 8 -s qq "what did we decide about the deploy rollback?"
+  qq-ask --json "..."
+  qq-ask --transcripts "what did we decide about X last night?"   # opt-in session-transcript corpus
+  qq-ask -g "..."                                        # force the user store only (skip project
+                                                          #   discovery/composition even if present)
+
+--transcripts (limited-reader ideation proposal #1, ratified 2026-07-02): points retrieval at the
+DEDICATED transcripts corpus (~/kb-transcripts, built by transcript-index.sh) instead of the
+default ~/kb — a source auto-recall (resume-match.sh) and the live cache can never see, opt-in
+only via this flag. Answers in this mode carry the transcript banner, not the store snapshot
+banner: a transcript is unverified working memory, not a decision record. JUDGMENT CALL (spec
+P8): --transcripts forces a SINGLE index (the dedicated transcripts corpus only) — it never
+composes across the project/user search path, even when a project store is present. Merging a
+project's own HEADs into a deliberately isolated transcripts query would work against the
+flag's whole point (a corpus resume-match/auto-recall can never accidentally surface).
+
+Spec P3 note: --transcripts is a Config CONSTRUCTOR override (overrides={"QQ_KB_ROOT": ...,
+"QQ_CACHE": ...}), not the old pre-import os.environ surgery — Config is resolved once per
+process, after argv is parsed, so a CLI flag can simply override without any import-order
+constraint.
+
+RECALL COMPOSITION: with a project store on the resolved search path (and neither
+--transcripts nor -g/--global), this composes ONE SearchIndex per store
+(quintessence.searchcompose.ComposedSearchIndex) behind Ask — Ask itself needs no multi-store
+awareness (see quintessence/ask.py's module docstring). THE GOLDEN GATE: with no project store
+on the path, this is byte-identical to pre-P8 — a bare SearchIndex(config), same as always.
+"""
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from quintessence.config import Config  # noqa: E402
+from quintessence.search import SearchIndex  # noqa: E402
+from quintessence.ask import Ask, render, TRANSCRIPT_BANNER  # noqa: E402
+from quintessence.storepath import resolve_store_path  # noqa: E402
+from quintessence.searchcompose import build_indexes, ComposedSearchIndex  # noqa: E402
+
+_TRANSCRIPTS_KB_ROOT = os.path.expanduser("~/kb-transcripts")
+_TRANSCRIPTS_CACHE = os.path.expanduser("~/.cache/qq-search/embeddings-transcripts.json")
+
+
+def _flagval(args, i):
+    """Value for the flag at args[i]; a clean one-liner (not a traceback) when it's missing."""
+    if i + 1 >= len(args):
+        sys.exit(f"qq-ask: {args[i]} requires a value (see --help)")
+    return args[i + 1]
+
+
+def main():
+    import json
+    args = sys.argv[1:]
+    k, source, as_json, transcripts, force_global, q = 12, None, False, False, False, []
+    i = 0
+    while i < len(args):
+        if args[i] in ("-h", "--help", "help"):
+            print(__doc__); return
+        elif args[i] in ("-k", "--k"):
+            v = _flagval(args, i)
+            try:
+                k = int(v)
+            except ValueError:
+                sys.exit(f"qq-ask: {args[i]} expects an integer, got {v!r}")
+            i += 2
+        elif args[i] in ("-s", "--source"):
+            source = _flagval(args, i); i += 2
+        elif args[i] == "--json":
+            as_json = True; i += 1
+        elif args[i] == "--transcripts":
+            transcripts = True; i += 1
+        elif args[i] in ("-g", "--global"):
+            force_global = True; i += 1
+        else:
+            q.append(args[i]); i += 1
+    question = " ".join(q).strip()
+    if not question:
+        print(__doc__); return
+
+    overrides = {}
+    if transcripts:
+        overrides["QQ_KB_ROOT"] = _TRANSCRIPTS_KB_ROOT
+        overrides["QQ_CACHE"] = _TRANSCRIPTS_CACHE
+    config = Config(overrides=overrides)
+
+    # THE GOLDEN GATE: composition only for a genuine >=2-store path, never under --transcripts
+    # (a deliberately isolated corpus) or -g/--global. Every other branch is the pre-P8 path.
+    composed = False
+    if not transcripts and not force_global:
+        storepath = resolve_store_path(config=config)
+        composed = len(storepath.path) > 1
+
+    if composed:
+        idx = ComposedSearchIndex(build_indexes(storepath, config))
+    else:
+        idx = SearchIndex(config)
+    asker = Ask(config, idx)
+    result = asker.ask(question, k=k, source=source)
+    if as_json:
+        if transcripts:
+            result["banner"] = TRANSCRIPT_BANNER
+        print(json.dumps(result))
+        return
+    print(render(result, banner=TRANSCRIPT_BANNER if transcripts else None))
+
+
+if __name__ == "__main__":
+    main()

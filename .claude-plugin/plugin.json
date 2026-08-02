@@ -1,0 +1,7 @@
+{
+  "name": "quintessence",
+  "description": "Session-continuity store for AI agents: durable per-topic HEADs + journal, semantic recall, and a consistency checker. Bundles the write-path hooks and a /quintessence skill.",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "author": { "name": "Thomas Lakofski" }
+}
