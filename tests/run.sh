@@ -2,8 +2,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Thomas Lakofski
 # run.sh — run every test-*.sh in this directory against an isolated throwaway store and report.
-# Each test self-isolates (its own QUINTESSENCE_DIR / QQ_CONFIG), so this never touches a live
-# install. Exit 0 only if all suites pass. Override the engine under test with QQ_BIN=/path/to/qq.
+# Exit 0 only if all suites pass. Override the engine under test with QQ_BIN=/path/to/qq.
+#
+# ISOLATION IS THE SUITES' OWN JOB, and this line says what that is worth rather than promising it.
+# Each suite pins its own QUINTESSENCE_DIR / QQ_CONFIG / QQ_MEMDIR into a throwaway directory, and
+# the one suite that RUNS THE INSTALLER (test-setup-wire.sh) launches it under `env -i` with a
+# closed allowlist (PATH, HOME and a scratch git identity), so no environment override an operator
+# has exported can reach it. An earlier version of this comment stated the conclusion — "so this
+# never touches a live install" — and it
+# was FALSE: `QQ_CONFIG=/path/to/your/config bash tests/run.sh` reported all suites passed and
+# rewrote that config to a directory the suite then deleted (eighteenth pass, F1). What holds it up
+# now is checked, not asserted: tests/test-store-pollution.sh fails this gate if a suite runs the
+# installer without both defences, and test-setup-wire.sh pins the isolation behaviourally against
+# a decoy of every override setup.sh and qq-config.sh honour.
 set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
@@ -34,6 +45,17 @@ fi
 : "${GIT_COMMITTER_NAME:=qq-tests}"
 : "${GIT_COMMITTER_EMAIL:=qq-tests@localhost}"
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+
+# Keep the embedding cache out of the invoking user's home (eighth review pass, F3). QQ_CACHE
+# defaults to ~/.cache/qq-search/embeddings.json, so any suite that builds an index left .lock and
+# .orphan-ages.json files there -- contradicting this file's own header, in a directory the suite
+# does not own. Measured identically at the pre-atomicio base, so it is not a regression; it is
+# just the last thing the gate still deposited in a real HOME. Same idiom as the git identity
+# above: a caller's own QQ_CACHE wins, and the scratch directory goes away with this process.
+QQ_CACHE_SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$QQ_CACHE_SCRATCH"' EXIT
+: "${QQ_CACHE:=$QQ_CACHE_SCRATCH/embeddings.json}"
+export QQ_CACHE
 
 pass=0; fail=0; failed_suites=""
 for t in "$HERE"/test-*.sh; do

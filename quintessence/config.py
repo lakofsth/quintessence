@@ -190,9 +190,26 @@ KEYS: list[KeyDef] = [
            "roots – a --transcripts probe, an ad-hoc QQ_KB_ROOT override – that will never be "
            "revisited. Set 0 to disable the sweep. It runs at most once per SearchIndex "
            "instance and costs one listdir plus a stat over the cache directory. It never "
-           "removes a *.lock file (deleting a held lock breaks mutual exclusion), a *.tmp "
-           "file (an atomic write in flight), the "
-           "legacy non-identity-scoped QQ_CACHE path, or this instance's own identity files."),
+           "removes a *.lock file (deleting a held lock breaks mutual exclusion), a temp file "
+           "from an atomic write in flight – meaning one spelled the way this package generates "
+           "them, `<name>.tmp.<12 lowercase hex, at least one of them a letter>` (an "
+           "8-or-more-character window until 2026-08-04, which put foreign "
+           "`report.tmp.20260804`-shaped files on the one-hour deadline; the letter is required "
+           "because twelve digits are also valid hex, so `date +%Y%m%d%H%M` sat inside the "
+           "width – the cost is that roughly one temp in 281 has an all-decimal tail and waits "
+           "for the sweep above instead) – the "
+           "legacy non-identity-scoped QQ_CACHE path, or this instance's own identity files. "
+           "A temp left behind by a hard kill IS reclaimed, once it is older than an hour, and "
+           "again only that spelling. Any other `.tmp`-shaped name – a bare `<name>.tmp`, or "
+           "`notes.tmp.md` – is treated as an ordinary file of yours: never reclaimed at the "
+           "one-hour grace, because a directory sweep does not know the write targets and cannot "
+           "tell that name from a file of your own, but swept at the age above like anything "
+           "else in this directory. It used to be skipped outright, which exempted it from the "
+           "age sweep permanently. The atomic writer reclaimed a bare `<name>.tmp` beside the "
+           "file it was writing until 2026-08-04; that rule is gone, so nothing in qq deletes "
+           "that spelling any more (see ASSURANCE.md for the one delete condition that remains, "
+           "and `tools/reclaim_legacy_temps.py` for clearing litter a pre-atomicio install "
+           "left)."),
 
     # ---- ask (retrieval-as-QA) -----------------------------------------------------------
     KeyDef("QQ_ASK_ENDPOINTS", "csv", [], "ask",

@@ -34,6 +34,7 @@ import re
 import time
 from typing import Optional
 
+from .atomicio import atomic_write_lines, best_effort_write
 from .config import Config
 from .findings import Finding
 from .search import SearchIndex
@@ -161,13 +162,9 @@ class Xref:
         return out
 
     def _persist_waveoffs(self, rows: dict) -> None:
-        os.makedirs(os.path.dirname(self.waveoffs_path), exist_ok=True)
-        tmp = self.waveoffs_path + ".tmp"
         now = time.strftime('%FT%TZ', time.gmtime())
-        with open(tmp, "w", encoding="utf-8") as f:
-            for (m, h), iso in sorted(rows.items()):
-                f.write(f"{m}\t{h}\t{iso}\t{now}\n")
-        os.replace(tmp, self.waveoffs_path)
+        atomic_write_lines(self.waveoffs_path,
+            (f"{m}\t{h}\t{iso}\t{now}\n" for (m, h), iso in sorted(rows.items())))
 
     @staticmethod
     def _waved_still_quiet(waved_iso: str, head_e: float, head_iso: str) -> bool:
@@ -201,12 +198,14 @@ class Xref:
         return out
 
     def save_content_store(self, store: dict) -> None:
-        os.makedirs(os.path.dirname(self.content_path), exist_ok=True)
-        tmp = self.content_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            for topic, (h, e) in sorted(store.items()):
-                f.write(f"{topic}\t{h}\t{e:.0f}\n")
-        os.replace(tmp, self.content_path)
+        """Write the content-hash store.
+
+        All three callers treat this as best-effort and wrap it in `atomicio.best_effort_write`:
+        the store is a cache of hashes that rebuilds itself from the HEADs, so a failed save must
+        not fail a `qq check`. The decision stays at the callers rather than moving in here, so a
+        caller that does want the failure -- there is none today -- gets it by not wrapping."""
+        atomic_write_lines(self.content_path,
+            (f"{topic}\t{h}\t{e:.0f}\n" for topic, (h, e) in sorted(store.items())))
 
     def head_moved_epoch(self, topic: str, store: dict):
         head_e, head_iso = self.head_updated_epoch(topic)
@@ -264,10 +263,8 @@ class Xref:
                 verdict = "FIRE"
             rows.append((moved_e, sim, mname, mem_iso, hname, disp_iso, verdict))
         if dirty:
-            try:
+            with best_effort_write("xref content store", self.content_path):
                 self.save_content_store(store)
-            except OSError:
-                pass
         rows.sort(key=lambda r: (-r[0], -r[1]))
         return rows
 
@@ -320,10 +317,8 @@ class Xref:
         if head_iso is None:
             raise ValueError(f"xref waveoff: no HEAD '{hname}'")
         if dirty and _store is None:
-            try:
+            with best_effort_write("xref content store", self.content_path):
                 self.save_content_store(store)
-            except OSError:
-                pass
         rows = _rows if _rows is not None else self.load_waveoffs()
         rows[(mname, hname)] = miso
         if _rows is None:
@@ -341,10 +336,8 @@ class Xref:
             for m, h in fired:
                 self._waveoff_locked(m, h, _store=store, _rows=rows, _quiet=True)
             self._persist_waveoffs(rows)
-            try:
+            with best_effort_write("xref content store", self.content_path):
                 self.save_content_store(store)
-            except OSError:
-                pass
         return f"waved off {len(fired)} pair(s) for HEAD {hname}: " + ", ".join(m for m, _ in fired)
 
     def explain(self) -> str:

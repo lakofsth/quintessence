@@ -64,6 +64,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
+from .atomicio import atomic_write_text
 from .findings import Finding, FindingsFile
 from .store import Store, state_lock
 
@@ -197,11 +198,7 @@ def queue_proposal(store: Store, verb: str, topic: str, content: str, model: str
         except OSError:
             ff = FindingsFile()
         ff.set_section(SECTION, ff.get_section(SECTION) + [line])
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(ff.serialize())
-        os.replace(tmp, path)
+        atomic_write_text(path, ff.serialize())
     return (f"qq {verb}: AUTHORING GATE – '{head}' is a security-tagged topic and this "
             f"session's model ({model}) may draft but not author it alone; the proposed text "
             f"is queued as a PROPOSED write in {path} for ratification by a trusted session "

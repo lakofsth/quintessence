@@ -189,6 +189,7 @@ For you:
 | Doc | What it's for |
 |-----|---------------|
 | [INSTALL.md](INSTALL.md) | install + Claude Code wiring (plugin or manual) |
+| [RELEASE-NOTES.md](RELEASE-NOTES.md) | changes that ask something of you when you upgrade |
 | [DESIGN-NOTES.md](DESIGN-NOTES.md) | why it's built this way |
 | [ASSURANCE.md](ASSURANCE.md) | what is verified before a release, and what is deliberately not |
 | [SECURITY.md](SECURITY.md) | scope, and how to report a vulnerability privately |

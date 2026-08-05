@@ -31,6 +31,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
+from .atomicio import atomic_write_text
 from .findings import Finding, FindingsFile
 from .store import Store, state_lock
 
@@ -183,11 +184,7 @@ def write_findings(store: Store, findings: list) -> str:
         except OSError:
             ff = FindingsFile()
         ff.set_section(SECTION, lines)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(ff.serialize())
-        os.replace(tmp, path)
+        atomic_write_text(path, ff.serialize())
     return path
 
 

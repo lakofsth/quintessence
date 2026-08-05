@@ -49,18 +49,22 @@ shared cache" bug the reap-guard exists to prevent.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from .atomicio import (TEMP_GRACE_SECONDS, atomic_write, atomic_write_json,
+                       best_effort_write, is_generated_temp_name)
 from .config import Config
 from .store import LockTimeout, acquire_flock
 
@@ -407,11 +411,7 @@ class SearchIndex:
             return {}
 
     def _save_cache(self, cache: dict) -> None:
-        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
-        tmp = self.cache_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cache, f)
-        os.replace(tmp, self.cache_path)
+        atomic_write_json(self.cache_path, cache)
 
     # ---- A1 remainder (LOW severity): cache lock, keyed on cache identity ----------------------
     def _cache_lock(self):
@@ -470,7 +470,30 @@ class SearchIndex:
         if hits < len(sample) * _MIGRATION_HIT_THRESHOLD:
             return
         os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
-        shutil.copy2(self.legacy_cache_path, self.cache_path)
+        # Streamed through the atomic primitive, not shutil.copy2. copy2 truncates the
+        # destination and streams into it, so a concurrent `qq search` reading the identity
+        # cache during a D4 cutover got truncated JSON -- reproduced by the thirteenth pass at
+        # 44 torn reads against 2 clean while copying 1.3 MB. _load_cache swallows the
+        # ValueError and returns {}, so the visible cost was a silent full re-embed rather than
+        # corruption, which is exactly why nothing noticed. Streaming (not read-then-write)
+        # because this file reaches ~350 MB.
+        #
+        # What copy2 carried, and what happens to each property here. CONTENTS: copied, by
+        # copyfileobj. MODE: carried, by `mode=` below -- an atomic write cannot get this from
+        # the destination, which by the guard above cannot exist, so the FIRST version of this
+        # replacement dropped it and migrated a deliberately-0600 cache at 0644 for good
+        # (fourteenth pass, F1). Read from the fd we are copying FROM, so it cannot race a
+        # chmod between the stat and the read. MTIME and ATIME: not carried; nothing reads
+        # either, and the GC protects this path by name rather than by age. FILE FLAGS
+        # (`st_flags`): not carried, and not carriable -- copystat only does this on BSD-family
+        # platforms, and Linux has no equivalent. EXTENDED ATTRIBUTES: not carried; nothing
+        # here sets any on a cache file, and copystat's own attempt is best-effort. OWNER and
+        # GROUP: copy2 never carried these either (documented), so nothing changed -- the file
+        # is written by the running user in both versions.
+        with open(self.legacy_cache_path, encoding="utf-8") as src:
+            legacy_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
+            with atomic_write(self.cache_path, mode=legacy_mode) as dst:
+                shutil.copyfileobj(src, dst)
         sys.stderr.write(
             f"qq-search: migrated legacy embedding cache ({len(legacy)} vectors; model match "
             f"confirmed by a {len(sample)}-chunk sample, {hits} hit) -> {self.cache_path} – D4 "
@@ -489,14 +512,8 @@ class SearchIndex:
 
     def _save_orphan_ages(self, ages: dict) -> None:
         path = self._orphan_ages_path()
-        tmp = path + ".tmp"
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(tmp, "w") as f:
-                json.dump(ages, f)
-            os.replace(tmp, path)
-        except OSError:
-            pass
+        with best_effort_write("orphan-ages sidecar", path):
+            atomic_write_json(path, ages)
 
     def _reap(self, cache: dict, live: set, now: Optional[float] = None) -> dict:
         """End-of-build only (never mid-checkpoint). Two independent mechanisms:
@@ -553,11 +570,24 @@ class SearchIndex:
         to the OLD (now-unlinked) inode and believes it holds the lock, while a fresh acquirer
         creates a NEW file at the same path and flocks THAT (different) inode; both then believe
         they hold exclusive access to the same identity's cache with no exclusion between them.
-        Also never removes: a `*.tmp` file (an in-flight atomic write, per `_save_cache`'s
-        tmp+`os.replace` pattern — racing it could delete a save in progress), the legacy
+        Also never removes: a temp file from an in-flight atomic write
+        (`atomicio.is_generated_temp_name` — `<target>.tmp.` and exactly twelve lowercase hex
+        with at least one of them a letter, since racing a real one could delete a save in
+        progress; that predicate accepted any 8+ alphanumeric tail until 2026-08-04, which is
+        what put foreign `report.tmp.20260804`-shaped files on a one-hour deadline here, and it
+        accepted all-decimal twelve until the letter condition, which is how a
+        `settings.json.tmp.202608041200` backup could die), the legacy
         (non-identity-scoped) `QQ_CACHE` path itself (still a valid D4 migration source even if
         old), or any of THIS instance's own current identity files (its own cache, orphan-ages
         sidecar, or lock — about to be used by this very call).
+
+        A file that merely LOOKS like a temp — `notes.tmp.md`, `report.tmp.20260804`, or the
+        legacy `<name>.tmp` — is neither reclaimed at the one-hour grace nor exempt from the age
+        sweep: it is an ordinary
+        file in this directory and is treated as one. The skip used to be the wide
+        `atomicio.is_temp_name` and exited with `continue`, which carried such a file past the
+        age check too, exempting it from `QQ_CACHE_GC_DAYS` permanently in the one directory
+        this sweep exists to bound (sixteenth pass, F2).
 
         Errors are swallowed throughout: GC is a housekeeping nicety, never allowed to turn a
         search/build into a crash."""
@@ -572,10 +602,71 @@ class SearchIndex:
         own = {self.cache_path, self._orphan_ages_path(), self.cache_path + ".lock",
                self.legacy_cache_path}
         for name in names:
-            if name.endswith(".lock") or name.endswith(".tmp"):
-                continue   # HARD CONSTRAINT: never a lock file; never an in-flight write
+            if name.endswith(".lock"):
+                continue   # HARD CONSTRAINT: never a lock file
             full = os.path.join(cache_dir, name)
             if full in own:
+                # HARD CONSTRAINT, and it has to be tested BEFORE the temp branch below, not
+                # after it. An operator may reasonably point QQ_CACHE at a name ending `.tmp` --
+                # the embedding cache IS regenerable scratch -- and the delete predicate of the
+                # day (`is_own_temp_name`, deleted at `eb6f3e0`) called any name ending `.tmp`
+                # ours, so the reclaim deleted this instance's own live cache and the legacy
+                # migration source, silently, an hour after they were written.
+                # The blanket skip this branch replaced happened to protect them; the reclaim
+                # that replaced it did not. (Tenth pass, F1.)
+                #
+                # Pinned by test_a_generated_tail_cache_name_is_still_this_instance_s_own,
+                # whose QQ_CACHE basename carries a tail _open_unique_temp really emits. The
+                # test written WITH this branch used a bare `embeddings.tmp`, which the later
+                # narrowing of the delete side to is_generated_temp_name stopped matching --
+                # so the ordering sat unpinned for two commits while a docstring said it was
+                # pinned (fourteenth pass, F2). Narrowing a predicate voids the mutations of
+                # every test that leans on it; re-run them.
+                continue
+            if is_generated_temp_name(name):
+                # RECLAIM litter, at the one-hour grace rather than at the directory's own age
+                # policy. Load-bearing: unique temp names mean a hard kill leaves a NEW orphan
+                # each time instead of reusing one path, so without this a repeatedly OOM-killed
+                # build accumulates 350 MB files in the very directory this reaper exists to
+                # bound. Pinned by test_stale_temps_are_reclaimed_but_in_flight_ones_are_not,
+                # which ages its temp into the window only this branch covers (older than
+                # TEMP_GRACE_SECONDS, younger than the general cutoff), so removing the branch
+                # goes red. An earlier version of that test aged it 9999 days, which the general
+                # sweep reclaimed anyway — green either way, pinning nothing.
+                #
+                # ONE predicate, the NARROW one, and it decides both halves. This is a directory
+                # sweep: it does not know the target basenames, so the only names it can honestly
+                # claim are the ones _open_unique_temp generates, tail and all -- and the delete
+                # side has been too generous here twice (`notes.tmp.md` read as a temp to
+                # is_temp_name, seventh pass F2; then `is_own_temp_name`, since deleted, called
+                # ANY name ending `.tmp` ours, eleventh pass F1).
+                #
+                # The SKIP used to be wider than the delete -- `is_temp_name`, anything merely
+                # containing `.tmp.` -- and it exits with `continue`, which carried it past the
+                # general age check as well. So an operator's `notes.tmp.md` in the cache
+                # directory was exempt from QQ_CACHE_GC_DAYS forever, in the one directory this
+                # sweep exists to bound, and no test justified the width (sixteenth pass, F2).
+                # A foreign `.tmp`-shaped file is now treated as what it is: an ordinary file,
+                # kept off the one-hour deadline and swept at the directory's own age policy like
+                # any other. Nothing is lost by narrowing, because the wide skip was never what
+                # kept a save alive: QQ_CACHE_GC_DAYS is whole days and <= 0 disables the sweep,
+                # so the smallest enabled cutoff is 24h and a seconds-old temp of any spelling
+                # already survives the general check on mtime alone.
+                #
+                # THE AGE COMES FROM THE NAME'S OWN INODE, `os.lstat`, which is what the
+                # primitive's `entry.stat(follow_symlinks=False)` reads beside every write
+                # target. This line followed symlinks until 2026-08-04, and the two paths
+                # disagreed on exactly that one property (twentieth pass, F3): on a DANGLING
+                # link `os.path.getmtime` raises ENOENT, the suppress below absorbs it, and the
+                # `continue` carries the entry past the general age check as well -- so a broken
+                # link wearing a generated tail was exempt from every age check there is, in the
+                # one directory this sweep exists to bound. That is the sixteenth pass's F2
+                # again, narrowed to one input. A link's own mtime is a perfectly readable fact;
+                # reading it here reclaims the link (never its target -- `os.remove` on a symlink
+                # removes the link) on the same terms as any other name of this shape.
+                with contextlib.suppress(OSError):
+                    if time.time() - os.lstat(full).st_mtime > TEMP_GRACE_SECONDS:
+                        os.remove(full)
                 continue
             try:
                 if not os.path.isfile(full):

@@ -12,6 +12,11 @@ ENGINE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 TSK="$ENGINE/tsk"
 TMP="$(mktemp -d)"
 export TSK_STATE="$TMP/state"
+# `tsk` sources qq-config.sh, so an inherited QQ_CONFIG hands this suite the operator's own
+# per-install settings for every key it does not pin itself. Nothing here WRITES config — the
+# eighteenth-pass CRITICAL was the installer, not this — but a suite that reads a live config is
+# not hermetic, and the same one-line pin every other suite carries costs nothing here.
+export QQ_CONFIG="$TMP/config"; : > "$QQ_CONFIG"
 J="qqtest-$$"   # unique name prefix so parallel/aborted runs never collide on the user manager
 cleanup() {
   systemctl --user stop "tsk-$J-dup.service" >/dev/null 2>&1

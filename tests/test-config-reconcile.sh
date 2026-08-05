@@ -11,6 +11,10 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # QQ_DOCDIR MUST be isolated to a throwaway dir — default is ~/docs, which a test must never scan.
 # Kept EMPTY through the store/memory cases below so they are unaffected; populated for the doc block.
 export QUINTESSENCE_DIR="$TMP/store" QQ_MEMDIR="$TMP/mem" QQ_STATE_DIR="$TMP/state" QQ_RECONCILE_SNAPSHOT="$TMP/snap.json" QQ_DOCDIR="$TMP/docs"
+# An inherited QQ_CONFIG supplies the operator's own values for every key not pinned above, so
+# pin an empty one — the same defence every other suite that reads config carries (eighteenth
+# pass, F1's class sweep; this suite reads config but does not write it).
+export QQ_CONFIG="$TMP/config"; : > "$QQ_CONFIG"
 mkdir -p "$QUINTESSENCE_DIR" "$QQ_MEMDIR" "$QQ_STATE_DIR" "$QQ_DOCDIR"
 fail=0; pass=0
 ok(){ pass=$((pass+1)); printf 'ok   %s\n' "$1"; }

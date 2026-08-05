@@ -23,6 +23,7 @@ import shutil
 import subprocess
 from typing import Optional
 
+from .atomicio import atomic_write_text
 from .config import Config, _is_temp_path
 
 HOME = os.path.expanduser("~")
@@ -278,14 +279,10 @@ def config_set(config: Config, key: str, value: str, *,
         raise AdminError(f"qq config set: {result.message}", 2)
     if result.message:
         warnings.append(f"qq config set: {result.message}")
-    os.makedirs(os.path.dirname(f), exist_ok=True)
     lines = _config_file_lines(f)
     kept = [ln for ln in lines if not ln.startswith(f"{key}=")]
     kept.append(f"{key}={value}")
-    tmp = f + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(kept) + "\n")
-    os.replace(tmp, f)
+    atomic_write_text(f, "\n".join(kept) + "\n")
     return f"config: set {key} in {f}", warnings
 
 

@@ -84,8 +84,15 @@ class DispatcherHarness(unittest.TestCase):
         })
 
     def run_qq(self, args, stdin=None):
+        # `input=None` does NOT redirect stdin -- the child inherits the runner's. The exec stubs
+        # here call sys.stdin.read(), so whenever the suite runs with a stdin that never sends
+        # EOF (an agent harness, `ssh` without -n, some CI runners) the child blocks forever and
+        # the whole suite hangs with no further output. Observed 2026-08-03: a 6-minute stall in
+        # test_ask_direct_execs_to_qq_ask_not_legacy with the stub's fd 0 an open socket. Pass an
+        # empty string so stdin is a pipe that EOFs at once; an explicit `stdin=` still works.
         return subprocess.run([sys.executable, os.path.join(self.tmp, "qq"), *args],
-                               input=stdin, capture_output=True, text=True, env=self.env)
+                               input="" if stdin is None else stdin,
+                               capture_output=True, text=True, env=self.env)
 
 
 class TestNativeVerbsDoNotDelegate(DispatcherHarness):

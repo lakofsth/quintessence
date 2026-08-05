@@ -6,11 +6,13 @@ its date/timestamp-precision dedupe, and the MAX-findings cap. The embedding-ind
 parts (pair_sims/candidates/findings) are exercised end-to-end via the LIVE parity check in the
 build report (byte-identical against staleness-xref.py on the real store); here we unit-test the
 pieces that don't require a real embedder."""
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 ENGINE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -118,6 +120,41 @@ class TestWaveoffRoundTrip(unittest.TestCase):
             self.assertIn("waved off", msg)
             loaded = xr.load_waveoffs()
             self.assertIn(("m1", "h1"), loaded)
+
+    def test_a_content_store_too_long_to_write_says_so_and_the_waveoff_still_lands(self):
+        """Seventeenth pass, F1, swept one frame up. `save_content_store` carries no handler of
+        its own — all three of its callers wrapped it in `except OSError: pass`, so the atomic
+        write's name-length refusal was swallowed there instead, and `QQ_XREF_CONTENT` is a name
+        an operator sets. A scan that looked only at the write's own lines called this clean.
+
+        Both halves are asserted: the wave-off completes (the content store is a cache of hashes
+        that rebuilds itself, so a failed save must not fail the command) and the refusal reaches
+        stderr with the arithmetic."""
+        import quintessence.atomicio as atomicio
+        with tempfile.TemporaryDirectory() as base:
+            state = os.path.join(base, "state")
+            os.makedirs(state, exist_ok=True)
+            limit = os.pathconf(state, "PC_NAME_MAX")
+            edge = limit - atomicio._TEMP_NAME_OVERHEAD
+            content = os.path.join(state, "x" * (edge + 1))
+
+            xr = make_xref(base, QQ_XREF_CONTENT=content)
+            self._write_head(base, "h1", "2026-01-01T00:00:00Z")
+            self._write_mem(base, "m1")
+
+            err = io.StringIO()
+            with unittest.mock.patch.object(sys, "stderr", err):
+                msg = xr.waveoff("m1", "h1")
+
+            self.assertIn("waved off", msg, "the command must still complete")
+            self.assertIn(("m1", "h1"), xr.load_waveoffs(), "and its own write must have landed")
+            self.assertFalse(os.path.exists(content))
+            line = err.getvalue()
+            self.assertIn("xref content store", line,
+                          f"the refusal must reach the operator: {line!r}")
+            for number in ("17", str(edge + 1), str(limit), str(edge)):
+                self.assertIn(number, line,
+                              f"and carry the arithmetic — {number} missing from {line!r}")
 
     def test_waveoff_unknown_memory_raises(self):
         with tempfile.TemporaryDirectory() as base:
