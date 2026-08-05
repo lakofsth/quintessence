@@ -5,14 +5,18 @@ reads), the no-registry no-op, a stale-token flag in a HEAD essence, the live-re
 the deploy-hook change-detection snapshot half. See tests/test-config-reconcile.sh for the
 fuller bash-level behavioural suite this mirrors at unit granularity; both are green and were
 diffed byte-for-byte against the live store's config-reconcile.py run (see the build report)."""
+import errno
+import io
 import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from quintessence.config import Config
+from quintessence import reconcile as reconcilemod
 from quintessence.reconcile import Reconcile
 
 
@@ -116,6 +120,55 @@ class TestChangeDetectionSnapshot(unittest.TestCase):
             after_commit = rec.run()
             self.assertFalse(any("CHANGED" in ln for ln in after_commit),
                               "--commit-snapshot must acknowledge the change")
+
+
+class TestSnapshotWriteIsBestEffortButNotSilent(unittest.TestCase):
+    """Seventeenth pass, F1, swept from `search.py` to here.
+
+    `_save_snapshot` carried the same `except OSError: pass` as the orphan-ages sidecar, and
+    `QQ_RECONCILE_SNAPSHOT` is a name an operator sets — so this call site could reach the atomic
+    write's name-length refusal and swallow it, leaving change-detection quietly stuck on a
+    snapshot it never manages to update. The finding named search.py; the class reaches here.
+    """
+
+    def _too_long_snapshot(self, base: str):
+        import quintessence.atomicio as atomicio
+        state = os.path.join(base, "state")
+        os.makedirs(state, exist_ok=True)
+        limit = os.pathconf(state, "PC_NAME_MAX")
+        edge = limit - atomicio._TEMP_NAME_OVERHEAD
+        name = "s" * (edge + 1 - len(".json")) + ".json"
+        return os.path.join(state, name), edge, limit
+
+    def test_a_snapshot_name_too_long_to_write_says_so(self):
+        with tempfile.TemporaryDirectory() as base:
+            path, edge, limit = self._too_long_snapshot(base)
+            rec = make_reconcile(base, QQ_RECONCILE_SNAPSHOT=path)
+            err = io.StringIO()
+            with unittest.mock.patch.object(sys, "stderr", err):
+                rec._save_snapshot({"k": "v"})
+            self.assertFalse(os.path.exists(path))
+            line = err.getvalue()
+            self.assertIn("reconcile snapshot", line,
+                          f"the refusal must reach the operator: {line!r}")
+            for number in ("17", str(edge + 1), str(limit), str(edge)):
+                self.assertIn(number, line,
+                              f"and carry the arithmetic — {number} missing from {line!r}")
+
+    def test_a_transient_snapshot_failure_keeps_its_silence(self):
+        """The control: a check that cannot write its snapshot because the disk is full must not
+        start narrating that on every run, which is what the `pass` was for."""
+        with tempfile.TemporaryDirectory() as base:
+            rec = make_reconcile(base)
+
+            def _no_space(*a, **kw):
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            err = io.StringIO()
+            with unittest.mock.patch.object(reconcilemod, "atomic_write_json", _no_space):
+                with unittest.mock.patch.object(sys, "stderr", err):
+                    rec._save_snapshot({"k": "v"})
+            self.assertEqual(err.getvalue(), "")
 
 
 if __name__ == "__main__":

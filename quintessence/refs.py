@@ -61,6 +61,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .atomicio import atomic_write_lines
 from .store import Store, state_lock
 
 # Kinds a write-time driver exists for. `proc` is
@@ -1030,8 +1031,5 @@ def bind_corpus_files(store: Store, corpus: str, root: str, changed_rel: list,
                         continue   # superseded by this rebind
                     out_lines.append(raw)
         out_lines.extend(json.dumps(r, ensure_ascii=False) + "\n" for r in fresh)
-        tmp = str(path) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.writelines(out_lines)
-        os.replace(tmp, path)
+        atomic_write_lines(path, out_lines)
     return len(fresh)

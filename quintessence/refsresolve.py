@@ -49,6 +49,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
+from .atomicio import atomic_write_lines
 from .refs import (RefDriverError, _fp_file, _fp_git, bind_corpus_files, container_ids,
                    parse_bind_corpus, parse_bind_hosts, parse_exclude_roots,
                    parse_repo_aliases, path_excluded)
@@ -95,10 +96,7 @@ def append_event(store: Store, event: dict) -> None:
         try:
             if path.stat().st_size > EVENTS_MAX_BYTES:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines(True)
-                tmp = str(path) + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    fh.writelines(lines[-EVENTS_KEEP_LINES:])
-                os.replace(tmp, path)
+                atomic_write_lines(path, lines[-EVENTS_KEEP_LINES:])
         except Exception:
             pass   # a failed trim only defers to the next one
 
@@ -223,10 +221,7 @@ def _mark_suspects(store: Store, src: str, changed_abs: list, dirs_mode: bool,
             else:
                 out_lines.append(raw)
         if dirty:
-            tmp = str(path) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.writelines(out_lines)
-            os.replace(tmp, path)
+            atomic_write_lines(path, out_lines)
     return n_changed
 
 
@@ -412,10 +407,7 @@ def sweep(store: Store) -> dict:
                 else:
                     out_lines.append(raw)
             if dirty:
-                tmp = str(path) + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    fh.writelines(out_lines)
-                os.replace(tmp, path)
+                atomic_write_lines(path, out_lines)
         _log(store, "sweep: {swept} swept / {suspected} suspected / {cleared} cleared / "
                      "{upgraded} upgraded / {filled} filled / {probe_errors} probe-errors / "
                      "{fp_error_left} fp-error left".format(**counts))

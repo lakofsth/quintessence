@@ -11,4 +11,15 @@ set -u
 ENGINE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 command -v python3 >/dev/null 2>&1 || { echo "test-py.sh: python3 not found — skipping (treated as pass)"; exit 0; }
 cd "$ENGINE" || exit 1
+
+# Scratch embedding cache, so running this suite on its own does not deposit .lock and
+# .orphan-ages.json in the invoking user's ~/.cache/qq-search (ninth pass, P2). tests/run.sh sets
+# the same thing for the suites it drives, but its export cannot reach a direct `bash
+# tests/test-py.sh`; tests/py/conftest.py is the matching guard for the pytest runner, which does
+# not read this file. A caller's own QQ_CACHE wins, and the scratch dir goes with this process.
+QQ_CACHE_SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$QQ_CACHE_SCRATCH"' EXIT
+: "${QQ_CACHE:=$QQ_CACHE_SCRATCH/embeddings.json}"
+export QQ_CACHE
+
 PYTHONPATH="$ENGINE${PYTHONPATH:+:$PYTHONPATH}" python3 -m unittest discover -s tests/py -p 'test_*.py' -v

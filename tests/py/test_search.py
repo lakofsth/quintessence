@@ -5,9 +5,12 @@ cache identity derivation + legacy-cache migration, the QQ_EMBED_NUM_GPU options
 periodic mid-build cache checkpoint (grounded finding 2026-07-03: a killed long run must not
 lose already-embedded vectors), the orphan-decay + reap-guard, and build_index()'s corpus-
 signature revalidation (the property the long-lived MCP server depends on)."""
+import errno
 import hashlib
+import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import threading
@@ -37,6 +40,40 @@ def write_corpus(base: str, n: int = 6, source: str = "docs") -> None:
     for i in range(n):
         with open(os.path.join(d, f"doc{i}.md"), "w") as f:
             f.write(f"# doc {i}\nunique content sentinel number {i}\n")
+
+
+def _letter_bearing_token(width: int, seq: int) -> bytes:
+    """Bytes to hand a forced `os.urandom`: `width` of them, distinct per `seq`, and always
+    spelling a hex tail that carries one of `abcdef`.
+
+    WHY A FIXTURE HERE MAY NOT USE THE REAL RANDOMNESS. `atomicio.is_generated_temp_name` — the
+    predicate this sweep deletes on — is deliberately NARROWER than the writer: on top of twelve
+    lowercase hex it requires a hex LETTER, because twelve digits are also twelve valid hex
+    characters and an operator's `date +%Y%m%d%H%M` backup sat inside the width (twenty-first
+    pass, F2). About one tail in 281 therefore comes out all-decimal and is never claimed, so
+    every fixture below that needs its temp RECOGNISED was asserting a coin flip: four of the nine
+    such pins in the estate are in this file (D77).
+
+    NOT a name spelled by hand: only the randomness is pinned, and the temp is still opened by
+    `_open_unique_temp` itself (rule 7). Width comes from whatever `os.urandom` was asked for, so
+    a change to the writer's token width moves the fixture rather than stranding it.
+
+    Twinned by an identical helper in tests/py/test_atomicio.py — the two files have the same
+    fixtures and no import path to each other. Every use site guards itself with the real
+    predicate, so a divergence surfaces as a red fixture guard.
+    """
+    return b"\xaa" + seq.to_bytes(width - 1, "big")
+
+
+def _writer_temp(atomicio, parent: str, basename: str, seq: int = 0) -> str:
+    """A temp opened by the WRITER with its tail forced to one the sweep's delete predicate
+    claims. Returns the path; the descriptor is closed. `seq` must differ between temps sharing a
+    parent and basename — the forced token IS the name, so two of them collide on O_EXCL."""
+    with unittest.mock.patch.object(atomicio.os, "urandom",
+                                    lambda n: _letter_bearing_token(n, seq)):
+        fd, path = atomicio._open_unique_temp(parent, basename)
+    os.close(fd)
+    return path
 
 
 class FakeEmbedder:
@@ -127,6 +164,85 @@ class TestLegacyCacheMigration(unittest.TestCase):
             idx.build_index()
             self.assertTrue(os.path.exists(idx.cache_path), "migration did not create the identity cache")
             self.assertEqual(stub.calls, 0, "migrated cache should have made every chunk a hit — no re-embed")
+
+    def test_migration_writes_the_identity_cache_atomically(self):
+        """Thirteenth pass, F2. The migration used shutil.copy2, which truncates the destination
+        and streams into it, so a concurrent `qq search` reading the identity cache during a D4
+        cutover saw truncated JSON — the reviewer measured 44 torn reads against 2 clean while
+        copying 1.3 MB. _load_cache swallows the ValueError and returns {}, so the visible cost
+        was a silent full re-embed, which is why it went unnoticed for so long.
+
+        This pins the MECHANISM rather than a reproduced tear: a tear is timing-dependent and a
+        test that waits for one is a test that flakes. Revert the migration to copy2 and this
+        goes red, which is the property that matters — the destination is never truncated in
+        place."""
+        with tempfile.TemporaryDirectory() as base:
+            write_corpus(base, n=5)
+            idx = make_index(base)
+            legacy = self._legacy_cache_for(idx, idx.embed_model)
+            os.makedirs(os.path.dirname(idx.legacy_cache_path), exist_ok=True)
+            with open(idx.legacy_cache_path, "w") as f:
+                json.dump(legacy, f)
+
+            used = []
+            real = searchmod.atomic_write
+
+            def spy(path, *a, **k):
+                used.append(path)
+                return real(path, *a, **k)
+
+            idx.embed = FakeEmbedder()
+            with unittest.mock.patch.object(searchmod, "atomic_write", spy):
+                idx.build_index()
+
+            self.assertIn(idx.cache_path, used,
+                          "the migration must write the identity cache through atomicio, not "
+                          "truncate it in place")
+            with open(idx.cache_path) as f:
+                self.assertEqual(json.load(f), legacy, "content must survive the copy intact")
+
+    def test_migration_carries_the_legacy_cache_s_permission_bits(self):
+        """Fourteenth pass, F1. `shutil.copy2` carried the source's MODE as well as its mtime,
+        and replacing it with `atomic_write` accounted for only the mtime. The primitive's mode
+        carry-across stats the DESTINATION, and `_maybe_migrate_legacy_cache` returns early
+        unless the destination is absent — so there was never anything to stat, the chmod raised
+        FileNotFoundError into a `suppress`, and the temp kept `0o666 & ~umask`. An operator who
+        had deliberately `chmod 600`'d their embedding cache got it published at 0644 in a 0755
+        directory by a model cutover, permanently: every later `_save_cache` is a REWRITE, which
+        carries the widened mode forward.
+
+        Asserted in BOTH directions, so neither a hardcoded mode nor the process umask can pass
+        it: 0600 under umask 022, where the wrong answer WIDENS to 0644, and 0640 under umask
+        077, where the wrong answer NARROWS to 0600. The assertion is made after a full
+        `build_index`, which ends in a `_save_cache` rewrite, so it also pins the carry-forward.
+        Drop the `mode=` argument in `_maybe_migrate_legacy_cache` and both cases go red."""
+        for legacy_mode, mask in ((0o600, 0o022), (0o640, 0o077)):
+            with self.subTest(legacy_mode=oct(legacy_mode), umask=oct(mask)):
+                with tempfile.TemporaryDirectory() as base:
+                    write_corpus(base, n=5)
+                    idx = make_index(base)
+                    legacy = self._legacy_cache_for(idx, idx.embed_model)
+                    os.makedirs(os.path.dirname(idx.legacy_cache_path), exist_ok=True)
+                    with open(idx.legacy_cache_path, "w") as f:
+                        json.dump(legacy, f)
+                    os.chmod(idx.legacy_cache_path, legacy_mode)
+
+                    idx.embed = FakeEmbedder()
+                    old = os.umask(mask)
+                    try:
+                        idx.build_index()
+                    finally:
+                        os.umask(old)
+
+                    self.assertTrue(os.path.exists(idx.cache_path), "migration did not run")
+                    self.assertEqual(
+                        stat.S_IMODE(os.stat(idx.cache_path).st_mode), legacy_mode,
+                        f"a {legacy_mode:04o} legacy cache must migrate as {legacy_mode:04o}, "
+                        f"not as the umask default {0o666 & ~mask:04o} — copy2 carried mode and "
+                        f"the atomic write has to carry it too")
+                    self.assertEqual(
+                        stat.S_IMODE(os.stat(idx.legacy_cache_path).st_mode), legacy_mode,
+                        "the legacy source's own mode must be left alone")
 
     def test_mismatched_model_does_not_migrate(self):
         with tempfile.TemporaryDirectory() as base:
@@ -463,6 +579,91 @@ class TestOrphanDecayAndReapGuard(unittest.TestCase):
                 ages = json.load(f)
             self.assertEqual(ages, {}, "reap fired (guard didn't block) so nothing is left to track")
 
+    def _index_whose_sidecar_is_one_byte_too_long(self, base: str):
+        """(index, sidecar_length, edge, limit) for a QQ_CACHE whose SIDECAR lands one byte past
+        the atomic-write name budget while the identity cache beside it still fits.
+
+        The lengths come from the producers — pathconf for NAME_MAX, `_TEMP_NAME_OVERHEAD` for the
+        budget, and `_orphan_ages_path()` itself for what identity-scoping plus the suffix cost —
+        rather than from the 181 the review measured. Renaming the embed model or widening the
+        temp tail moves every one of those numbers, and a hand-written 181 would then be testing
+        a band the code no longer has.
+        """
+        import quintessence.atomicio as atomicio
+        cache_dir = os.path.join(base, "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        limit = os.pathconf(cache_dir, "PC_NAME_MAX")
+        edge = limit - atomicio._TEMP_NAME_OVERHEAD
+
+        probe = make_index(base, QQ_CACHE=os.path.join(cache_dir, "embeddings.json"))
+        derived = len(os.path.basename(probe._orphan_ages_path())) - len("embeddings.json")
+
+        stem = "c" * (edge + 1 - derived - len(".json"))
+        idx = make_index(base, QQ_CACHE=os.path.join(cache_dir, stem + ".json"))
+        sidecar = os.path.basename(idx._orphan_ages_path())
+        self.assertEqual(len(sidecar), edge + 1,
+                         "fixture must sit exactly one byte past the budget, not merely beyond it")
+        self.assertLessEqual(len(os.path.basename(idx.cache_path)), edge,
+                             "the identity cache itself must still be writable — the whole point "
+                             "is that the cache lands and only the sidecar is refused")
+        return idx, edge, limit
+
+    def test_a_sidecar_too_long_to_write_says_so_instead_of_vanishing(self):
+        """Seventeenth pass, F1. `_save_orphan_ages` swallowed every OSError, including the
+        name-length refusal the atomic write had just been taught to make loud. Reproduced at
+        the tip before the fix: a QQ_CACHE basename of 181 bytes writes its identity cache and
+        silently stops writing the sidecar, with nothing on stderr — so orphan-vector age
+        tracking degraded invisibly and ASSURANCE's "the refusal is loud" was false at the only
+        call site that could reach it.
+
+        Best-effort is still the right shape for this write, and that is the second assertion:
+        the reap must complete and return its cache. What changes is that the operator hears
+        about a name that can never work."""
+        with tempfile.TemporaryDirectory() as base:
+            idx, edge, limit = self._index_whose_sidecar_is_one_byte_too_long(base)
+            err = io.StringIO()
+            with unittest.mock.patch.object(sys, "stderr", err):
+                idx._save_orphan_ages({"k": time.time()})
+
+            self.assertFalse(os.path.exists(idx._orphan_ages_path()),
+                             "the write is genuinely refused — this test is about the silence, "
+                             "not about making the write succeed")
+            line = err.getvalue()
+            self.assertIn("orphan-ages sidecar", line,
+                          f"the refusal must reach the operator, not die in a `pass`: {line!r}")
+            for number in ("17", str(edge + 1), str(limit), str(edge)):
+                self.assertIn(number, line,
+                              f"and must carry the arithmetic — {number} missing from {line!r}")
+
+    def test_a_reap_still_finishes_when_its_sidecar_cannot_be_written(self):
+        """The other half of the same finding: the `except OSError: pass` exists for a reason.
+        Sweep housekeeping must not fail a search, so the loud refusal is a warning and not a
+        raise, and `_reap` returns its result with the too-long name in force."""
+        with tempfile.TemporaryDirectory() as base:
+            idx, _edge, _limit = self._index_whose_sidecar_is_one_byte_too_long(base)
+            cache = {"k0": [0.0], "k1": [0.0]}
+            with unittest.mock.patch.object(sys, "stderr", io.StringIO()):
+                out = idx._reap(cache, {"k0"})
+            self.assertEqual(set(out), {"k0"}, "the reap's own result is unaffected")
+
+    def test_a_transient_sidecar_failure_keeps_its_silence(self):
+        """The control that separates this fix from the wrong one. Warning on every OSError
+        would pass the test above as well, and would put a full disk or a read-only mount on
+        stderr in the middle of every search — the failures the `pass` was written to absorb,
+        every one of which may be gone by the next run."""
+        with tempfile.TemporaryDirectory() as base:
+            idx = make_index(base)
+            os.makedirs(os.path.dirname(idx.cache_path), exist_ok=True)
+
+            def _no_space(*a, **kw):
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            err = io.StringIO()
+            with unittest.mock.patch.object(searchmod, "atomic_write_json", _no_space):
+                with unittest.mock.patch.object(sys, "stderr", err):
+                    idx._save_orphan_ages({"k": time.time()})
+            self.assertEqual(err.getvalue(), "", "a transient failure stays quiet")
+
 
 class TestCorpusSignatureRevalidation(unittest.TestCase):
     """Spec A3: a long-lived caller (the MCP server) must see a changed corpus rebuild instead
@@ -741,6 +942,344 @@ class TestGCStaleIdentityCaches(unittest.TestCase):
             idx.build_index()
             self.assertTrue(os.path.exists(ancient), "QQ_CACHE_GC_DAYS=0 must disable GC entirely")
 
+    def test_stale_temps_are_reclaimed_but_in_flight_ones_are_not(self):
+        """V2 from the 2026-08-03 sandboxed pass. The old predictable "<target>.tmp" was
+        self-limiting — a hard kill left one file and the next write truncated that same path.
+        Unique temp names leave a NEW orphan per kill, so repeated OOM-kills during a
+        checkpoint would accumulate 350 MB files in the very directory this reaper bounds.
+        Age is the discriminator: an in-flight write is seconds old."""
+        with tempfile.TemporaryDirectory() as base:
+            idx = make_index(base)
+            cache_dir = os.path.dirname(idx.cache_path)
+            os.makedirs(cache_dir, exist_ok=True)
+            # From the WRITER, not spelled by hand. These fixtures were once six-character tails,
+            # a shape `_open_unique_temp` cannot produce, so they exercised nothing once the
+            # reaper narrowed to names it recognises; hand-writing twelve hex characters fixed
+            # that instance and left the same trap armed for the next width change. Asking the
+            # producer removes it (Rule 7) — and the same fixture-shape drift is what left the
+            # reclaim's prefix condition unpinned in test_atomicio (sixteenth pass, F5).
+            # The TAIL is held still as well (D77): the delete predicate claims only tails
+            # carrying a hex letter, so on the real randomness `stale` was unreclaimable about
+            # one run in 281 and this went red for a reason that is ruled behaviour.
+            import quintessence.atomicio as atomicio
+            temps = []
+            for i in range(2):
+                path = _writer_temp(atomicio, cache_dir,
+                                    "embeddings.someid-model-v1.json", seq=i)
+                with open(path, "w") as fh:
+                    fh.write("{}")
+                temps.append(path)
+            stale, live = temps
+            # 2 HOURS, not 9999 days. Ageing it past the general 60-day cutoff made the test
+            # pass whether or not the temp branch exists — the general sweep reclaimed it anyway,
+            # so the branch's actual contribution (reclaim at an hour rather than 60 days, a
+            # 1440x difference) was invisible. This window is reclaimable ONLY by the temp branch.
+            self._age(stale, 2 / 24)        # crash litter
+            idx.build_index()
+            self.assertFalse(os.path.exists(stale), "an hours-old temp is litter and must be reclaimed")
+            self.assertTrue(os.path.exists(live), "a fresh temp may be a write in flight")
+
+    def test_a_dangling_temp_named_symlink_is_reclaimed_like_any_other_litter(self):
+        """Twentieth pass, F3. The two reclaim paths disagreed on ONE property: the primitive
+        reads the age with `entry.stat(follow_symlinks=False)`, this sweep read it with
+        `os.path.getmtime`, which follows. On a DANGLING symlink there is nothing to follow, so
+        `getmtime` raised ENOENT, `contextlib.suppress(OSError)` absorbed it, and the `continue`
+        on the next line carried the entry past the general age check as well — the shape of the
+        sixteenth pass's F2 (a wide skip exiting with `continue`) surviving in one narrow case.
+        The link then sat in the cache directory forever, in the one directory this sweep exists
+        to bound.
+
+        The link's own mtime is a real, sweepable fact, and it is the fact the primitive would
+        have used beside any of the fourteen atomic-write targets. Reading it here makes the two
+        paths agree: a name this module could have written is reclaimed at the grace whether the
+        inode behind it is a file, a dangling link, or nothing at all.
+
+        FIXTURE FROM THE PRODUCER (Rule 7): the NAME comes from `_open_unique_temp`, so the
+        twelve-hex spelling cannot drift out from under the pin the way the six-character tails
+        did. Only the name is borrowed — the real file is removed and a symlink to a
+        never-created path is put in its place.
+
+        Aged two hours ON THE LINK (`follow_symlinks=False`; the class helper would raise ENOENT
+        chasing the missing target): past TEMP_GRACE_SECONDS, far inside the general 60-day
+        cutoff, so ONLY the temp branch could remove it. Put `os.path.getmtime` back and the
+        first assertion goes red.
+
+        The control comes after the measurement: a FRESH dangling link of the same shape
+        survives, so what this pins is an age check that now reads the link, not a new rule that
+        deletes every broken symlink it sees."""
+        import quintessence.atomicio as atomicio
+        with tempfile.TemporaryDirectory() as base:
+            idx = make_index(base, QQ_CACHE_GC_DAYS="60")
+            cache_dir = os.path.dirname(idx.cache_path)
+            os.makedirs(cache_dir, exist_ok=True)
+
+            links = []
+            for i in range(2):
+                # Tail held still (D77) — the fixture guard below holds only for a tail carrying
+                # a hex letter, which is all but about one tail in 281.
+                generated = _writer_temp(atomicio, cache_dir, "embeddings.json", seq=i)
+                os.unlink(generated)
+                os.symlink(os.path.join(base, "no-such-target"), generated)
+                self.assertTrue(atomicio.is_generated_temp_name(os.path.basename(generated)),
+                                "fixture guard: this pin only has teeth while the name is one the "
+                                "sweep's temp branch claims")
+                self.assertFalse(os.path.exists(generated), "fixture guard: the link must dangle")
+                self.assertTrue(os.path.islink(generated))
+                links.append(generated)
+            stale, fresh = links
+            old = time.time() - 2 * 3600
+            os.utime(stale, (old, old), follow_symlinks=False)
+
+            idx.build_index()
+
+            self.assertFalse(os.path.lexists(stale),
+                             "a dangling link wearing a name this module writes is litter with a "
+                             "readable age, and the sweep must reclaim it rather than let the "
+                             "unreadable target exempt it from every age check there is")
+            self.assertTrue(os.path.lexists(fresh),
+                            "a seconds-old temp may be a write in flight whatever the inode "
+                            "behind its name is — the grace still governs")
+
+    def test_a_foreign_temp_lookalike_is_not_put_on_the_one_hour_deadline(self):
+        """Seventh pass, F2. `is_temp_name` matches any basename CONTAINING ".tmp.", so a file
+        like `notes.tmp.md` read as a temp here and was deleted at an hour rather than at the
+        directory's own policy. The reaper now deletes only what it can recognise as its own.
+
+        Aged two hours: past TEMP_GRACE_SECONDS (the window the temp branch reclaims in) but far
+        short of the general cutoff, so ONLY the temp branch could remove it.
+
+        MUTATION, performable as written and verified by performing it: add `is_temp_name` to
+        this module's import from `.atomicio`, and in `_gc_stale_identity_caches` widen the temp
+        branch's condition from `if is_generated_temp_name(name):` to `if is_temp_name(name):`.
+        That is the seventh-pass F2 behaviour exactly — `is_temp_name` matches any basename
+        CONTAINING `.tmp.`, so `notes.tmp.md` is claimed — and this test goes red. Note that the
+        LOOSER-looking `name.endswith(".tmp")` does NOT turn it red: this fixture ends `.md`.
+        (The instruction here used to say "revert the `is_own_temp_name` guard"; that function
+        was deleted at `eb6f3e0`, so the instruction had become uncarryable in a suite whose
+        whole method is mutation — twenty-first pass, F5.)
+
+        This is HALF of the property; the other half is the test below. "Not on the one-hour
+        deadline" must not mean "exempt from the sweep", which is what it silently meant while
+        the skip was wide."""
+        with tempfile.TemporaryDirectory() as base:
+            idx = make_index(base)
+            cache_dir = os.path.dirname(idx.cache_path)
+            os.makedirs(cache_dir, exist_ok=True)
+            foreign = os.path.join(cache_dir, "notes.tmp.md")
+            with open(foreign, "w") as fh:
+                fh.write("not ours")
+            self._age(foreign, 2 / 24)
+            idx.build_index()
+            self.assertTrue(os.path.exists(foreign),
+                            "a file this reaper does not own must not get a one-hour deadline")
+
+    def test_an_eight_character_tail_is_a_foreign_file_not_our_litter(self):
+        """Eighteenth pass, F5. The delete predicate accepted any tail of 8+ `[A-Za-z0-9_]`, not
+        the twelve lowercase hex the writer emits, and justified the width by mkstemp temps from
+        an earlier build "still on disk after an upgrade". No such disk exists: that code ran only
+        on the author's own mirror, for five hours on 2026-08-03.
+
+        What the window did reach are shapes an operator really has. The reviewer measured all
+        three of these deleted after ONE HOUR in the embedding-cache directory, whose documented
+        age policy is sixty days — a 1440x difference, applied to somebody else's files.
+
+        Aged two hours: past TEMP_GRACE_SECONDS but far short of the general cutoff, so only the
+        temp branch could remove them. Restore the 8-character floor and every one of these goes
+        red; that is the fail-first for the narrowing, and it is here rather than only against the
+        predicate because a predicate test cannot show the 1440x.
+
+        The sibling of this test, one target over, is in test_atomicio.py: `notes.tmp.markdown`
+        was reclaimed beside a target called `notes` while `notes.tmp.md` — the case the
+        docstring highlighted protecting — survived. A rule that protects the two-letter
+        extension and not the eight-letter one is drawn in the wrong place."""
+        with tempfile.TemporaryDirectory() as base:
+            idx = make_index(base, QQ_CACHE_GC_DAYS="60")
+            cache_dir = os.path.dirname(idx.cache_path)
+            os.makedirs(cache_dir, exist_ok=True)
+            foreign = []
+            for name in ("report.tmp.20260804", "backup.tmp.snapshot", "other-tool.tmp.a1b2c3d4"):
+                p = os.path.join(cache_dir, name)
+                with open(p, "w") as fh:
+                    fh.write("somebody else's file")
+                self._age(p, 2 / 24)
+                foreign.append(p)
+            idx.build_index()
+            for p in foreign:
+                self.assertTrue(os.path.exists(p),
+                                f"{os.path.basename(p)} carries a tail this module cannot write, "
+                                f"so it is an ordinary file in this directory and must live to "
+                                f"the directory's own 60-day policy, not to a one-hour deadline")
+
+    def test_a_foreign_temp_lookalike_is_still_swept_at_the_directory_s_own_age(self):
+        """Sixteenth pass, F2. The protect predicate was the WIDE `is_temp_name` — true for any
+        basename containing `.tmp.` — and the branch exits with `continue`, which carried such a
+        file past the general age check as well. So a `.tmp`-shaped foreign file in the embedding
+        cache directory was exempt from QQ_CACHE_GC_DAYS *permanently*, in the one directory this
+        sweep exists to bound (the grounded figure: ~80 orphan-ages sidecars vs 3 real caches on a
+        live install). Measured at the reviewed tip: a `notes.tmp.md` aged 400 days survived
+        forever, where the pre-atomicio commit reaped it.
+
+        Narrowing the protect predicate to `is_generated_temp_name` left all 63 tests in this file
+        green — which is the finding restated: nothing here pinned the width in either direction.
+        This is the missing assertion. Both `.tmp`-ish spellings a foreign file can wear are
+        planted, because both were exempt: a name containing `.tmp.` and the bare legacy one.
+
+        Aged 400 days against the 60-day default, so ONLY the general age check can remove them —
+        the temp branch's own window is an hour and it no longer claims these names at all."""
+        with tempfile.TemporaryDirectory() as base:
+            idx = make_index(base, QQ_CACHE_GC_DAYS="60")
+            cache_dir = os.path.dirname(idx.cache_path)
+            os.makedirs(cache_dir, exist_ok=True)
+            aged = []
+            for name in ("notes.tmp.md", "notes.tmp"):
+                p = os.path.join(cache_dir, name)
+                with open(p, "w") as fh:
+                    fh.write("a foreign file, 400 days old")
+                self._age(p, 400)
+                aged.append(p)
+            idx.build_index()
+            for p in aged:
+                self.assertFalse(os.path.exists(p),
+                                 f"{os.path.basename(p)} is not a temp this module generates, so "
+                                 f"it is an ordinary file here and the QQ_CACHE_GC_DAYS sweep must "
+                                 f"reach it — a `.tmp`-shaped name must not buy permanent exemption")
+
+    def test_a_cache_path_ending_in_tmp_is_still_this_instance_s_own(self):
+        """Tenth pass, F1. The `own` set is a HARD CONSTRAINT — it protects the cache this very
+        call is about to use and the legacy migration source. It used to be checked AFTER the
+        temp branch, which exits with `continue`, so a QQ_CACHE the operator had named
+        `…/cache.tmp` never reached it: the delete predicate then in force, `is_own_temp_name`
+        (deleted at `eb6f3e0`), called anything ending `.tmp` ours, and the reclaim deleted both
+        the live cache and the legacy source an hour after they were written. Plausible
+        configuration — the embedding cache really is regenerable scratch.
+
+        Aged two hours: past TEMP_GRACE_SECONDS, far inside the general cutoff, so only the temp
+        branch could remove them.
+
+        This test NO LONGER ARMS THE ORDERING, and the claim that it does was false from
+        `a056170` onward: narrowing the delete side to `is_generated_temp_name` means a bare
+        `embeddings.tmp` is skipped by the temp branch either way, so the `own` check can be
+        moved below it and this stays green (fourteenth pass, F2). What survives here is still
+        worth pinning — a cache the operator named `.tmp` is not litter — but the ordering is
+        pinned by the test below, whose fixture the delete predicate actually matches."""
+        with tempfile.TemporaryDirectory() as base:
+            idx = make_index(base, QQ_CACHE=os.path.join(base, "cache", "embeddings.tmp"))
+            cache_dir = os.path.dirname(idx.cache_path)
+            os.makedirs(cache_dir, exist_ok=True)
+            for p in (idx.cache_path, idx.legacy_cache_path):
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w") as fh:
+                    fh.write("{}")
+                self._age(p, 2 / 24)
+            idx.build_index()
+            self.assertTrue(os.path.exists(idx.cache_path),
+                            "this instance's own cache must survive however it is named")
+            self.assertTrue(os.path.exists(idx.legacy_cache_path),
+                            "the legacy migration source must survive however it is named")
+
+    def test_a_generated_tail_cache_name_is_still_this_instance_s_own(self):
+        """Fourteenth pass, F2 — the same HARD CONSTRAINT as the test above, re-armed with a
+        fixture the delete predicate actually matches.
+
+        The ordering (`own` BEFORE the temp branch, which exits with `continue`) went unpinned
+        the moment `a056170` narrowed the delete side from `is_own_temp_name` to
+        `is_generated_temp_name`: the older fixture's `embeddings.tmp` stopped matching, so the
+        mutation the docstring named stopped being visible. The constraint itself stayed
+        load-bearing — a QQ_CACHE whose basename carries a generated tail reaches the delete
+        branch, and moving the `own` check below it removes the legacy D4 migration source an
+        hour after it was written, silently, with the whole suite green.
+
+        The name comes from `_open_unique_temp` itself rather than being spelled by hand (Rule
+        7): the shape that matters is the one the writer emits, and the assertion below fails
+        loudly if a future change to the predicate or the token width voids this pin the way it
+        voided the last one. Only the LEGACY path can be armed — `identity_cache_path` always
+        inserts `.<identity>` before the extension, and a token containing a dot is not a
+        generated tail — so the identity cache is asserted as documentation, not as a trap.
+
+        Aged two hours: past TEMP_GRACE_SECONDS, far inside the general cutoff, so only the temp
+        branch could remove it. Put the `own` test back after the temp branch and this goes
+        red."""
+        import quintessence.atomicio as atomicio
+        with tempfile.TemporaryDirectory() as base:
+            cache_dir = os.path.join(base, "cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            # Tail held still (D77): the fixture guard below wants a name the DELETE predicate
+            # claims, and about one tail in 281 is all-decimal, which it does not.
+            generated = _writer_temp(atomicio, cache_dir, "embeddings")
+            os.unlink(generated)             # the NAME is the fixture; the cache is written below
+
+            idx = make_index(base, QQ_CACHE=generated)
+            self.assertTrue(
+                atomicio.is_generated_temp_name(os.path.basename(idx.legacy_cache_path)),
+                "fixture guard: this pin only has teeth while the cache basename is a name the "
+                "sweep's DELETE predicate claims — that is exactly what silently stopped being "
+                "true last time")
+
+            for p in (idx.cache_path, idx.legacy_cache_path):
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w") as fh:
+                    fh.write("{}")
+                self._age(p, 2 / 24)
+            idx.build_index()
+
+            self.assertTrue(os.path.exists(idx.legacy_cache_path),
+                            "the legacy migration source must survive a sweep that reads its "
+                            "generated-looking name as litter — it is in the `own` set")
+            self.assertTrue(os.path.exists(idx.cache_path),
+                            "this instance's own cache must survive however it is named")
+
+    def test_a_directory_sweep_claims_only_temps_it_can_recognise(self):
+        """Eleventh pass, F1. The previous fix rescued the `own` set and nothing else, so every
+        OTHER name ending `.tmp` here was still deleted an hour after it was written: sibling
+        identity caches (when the operator names the cache `.tmp`, which is the configuration the
+        previous commit's own message called plausible) and any foreign file sharing the
+        directory. Both survived at the base commit, protected by the blanket skip this branch
+        replaced — so the fix was a regression on everything it did not name.
+
+        A sweep does not know the target basenames, so the only names it can honestly claim are
+        the ones carrying the random tail _open_unique_temp generates.
+
+        MUTATION, performable as written and verified by performing it: in
+        `_gc_stale_identity_caches`, widen the temp branch's condition from
+        `if is_generated_temp_name(name):` to
+        `if name.endswith(".tmp") or is_generated_temp_name(name):`, which is what
+        `is_own_temp_name` did before `eb6f3e0` deleted it. Both of the first two assertions go
+        red (each measured on its own, since the run stops at the first) and the third stays
+        green — the litter the writer really made is still reclaimed. (The instruction here used
+        to say "put `is_own_temp_name` back" — naming a function that no longer exists, in a
+        suite whose whole method is mutation; twenty-first pass, F5.)
+
+        Aged two hours: past TEMP_GRACE_SECONDS, far inside the general cutoff, so only the temp
+        branch could remove them."""
+        import quintessence.atomicio as atomicio
+        with tempfile.TemporaryDirectory() as base:
+            idx = make_index(base, QQ_CACHE=os.path.join(base, "cache", "embeddings.tmp"))
+            cache_dir = os.path.dirname(idx.cache_path)
+            os.makedirs(cache_dir, exist_ok=True)
+
+            sibling = os.path.join(cache_dir, "embeddings.deadbeefcafe0123-qwen3-v1.tmp")
+            foreign = os.path.join(cache_dir, "someothertool-session.tmp")
+            for p in (sibling, foreign):
+                with open(p, "w") as fh:
+                    fh.write("not litter")
+                self._age(p, 2 / 24)
+
+            # From the producer, not spelled by hand (Rule 7) — this is the one shape a sweep
+            # MAY claim, and the reclaim half has to keep working. The tail is held still with
+            # it (D77): a sweep may claim only tails carrying a hex letter, so the third
+            # assertion was a coin flip about one run in 281.
+            litter = _writer_temp(atomicio, cache_dir, "embeddings.json")
+            self._age(litter, 2 / 24)
+
+            idx.build_index()
+
+            self.assertTrue(os.path.exists(sibling),
+                            "a sibling identity cache is not litter however the operator named it")
+            self.assertTrue(os.path.exists(foreign),
+                            "a foreign file sharing the cache directory is not this reaper's")
+            self.assertFalse(os.path.exists(litter),
+                             "a temp the writer actually generated is still reclaimed")
+
     def test_own_current_identity_files_never_swept(self):
         """This instance's own cache/orphan-ages/lock files must survive GC even if their mtime
         happens to predate the cutoff -- they're about to be read/written by THIS very call."""
@@ -780,7 +1319,13 @@ class TestGCStaleIdentityCaches(unittest.TestCase):
             self.assertTrue(os.path.exists(late_stale),
                              "GC must not re-run within the same instance's lifetime")
 
-    def test_tmp_file_never_removed(self):
+    def test_in_flight_tmp_file_never_removed(self):
+        """The hard constraint is that a write IN PROGRESS is never swept. This used to age the
+        file 9999 days and still demand it survive, which conflated "named .tmp" with "in
+        flight" — a 27-year-old temp is not a write in progress, it is litter from a hard kill,
+        and unique temp names mean that litter no longer self-limits. Narrowed 2026-08-03 to
+        the property actually being protected; the reclaim half is
+        test_stale_temps_are_reclaimed_but_in_flight_ones_are_not."""
         with tempfile.TemporaryDirectory() as base:
             idx = make_index(base, QQ_CACHE_GC_DAYS="1")
             cache_dir = os.path.dirname(idx.cache_path)
@@ -788,9 +1333,9 @@ class TestGCStaleIdentityCaches(unittest.TestCase):
             tmp = os.path.join(cache_dir, "embeddings.inflight-model-v1.json.tmp")
             with open(tmp, "w") as f:
                 f.write("{")
-            self._age(tmp, 9999)
-            idx.build_index()
-            self.assertTrue(os.path.exists(tmp), "an in-flight atomic-write .tmp file must never be swept")
+            idx.build_index()          # fresh: a write could genuinely be in progress
+            self.assertTrue(os.path.exists(tmp),
+                            "a temp from a write in flight must never be swept")
 
 
 class TestSearchMinSimFloor(unittest.TestCase):

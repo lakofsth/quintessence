@@ -53,6 +53,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .atomicio import atomic_write_text
 from .config import Config
 from .findings import Finding, FindingsFile
 from .heads import count_update_markers, head_meta, parse as parse_head
@@ -350,8 +351,4 @@ def persist_findings(store: Store, tier1_lines: list[str],
         ff.set_section("TIER1", tier1_lines)
         if xref_lines is not None:
             ff.set_section("XREF", xref_lines)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(ff.serialize())
-        os.replace(tmp, path)
+        atomic_write_text(path, ff.serialize())

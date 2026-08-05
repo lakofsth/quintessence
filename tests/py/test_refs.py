@@ -1457,7 +1457,12 @@ class TestBindCorpusFiles(unittest.TestCase):
                                  ["doc.md"], "hook")
         self.assertEqual(len(replace_calls), 1)
         src, dst = replace_calls[0]
-        self.assertTrue(str(src).endswith(".tmp"))
+        # The temp carries a unique suffix (atomicio names temps <target>.tmp.<random>, so two concurrent writers to
+        # one destination cannot truncate each other's in-flight file), so assert the PROPERTY --
+        # a sibling temp for this target -- rather than the exact old "<target>.tmp" spelling.
+        self.assertIn(".tmp", os.path.basename(str(src)))
+        self.assertTrue(os.path.basename(str(src)).startswith("refs.jsonl"))
+        self.assertEqual(os.path.dirname(str(src)), os.path.dirname(str(dst)))
         self.assertTrue(str(dst).endswith("refs.jsonl"))
 
     def test_replace_on_rebind_drops_old_records(self):

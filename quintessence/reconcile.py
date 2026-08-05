@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 
+from .atomicio import atomic_write_json, best_effort_write
 from .config import Config
 
 _HEADING = re.compile(r"^(#{1,6})\s")
@@ -110,14 +111,12 @@ class Reconcile:
             return {}
 
     def _save_snapshot(self, snap: dict) -> None:
-        try:
-            os.makedirs(os.path.dirname(self.snapshot_path), exist_ok=True)
-            tmp = self.snapshot_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(snap, fh, indent=0, sort_keys=True)
-            os.replace(tmp, self.snapshot_path)
-        except OSError:
-            pass
+        # Same shape as search.py's orphan-ages sidecar, and the same reason: QQ_RECONCILE_SNAPSHOT
+        # is a name an operator sets, so this call site can reach the atomic write's name-length
+        # refusal, and a bare `except OSError: pass` would swallow it into a snapshot that stops
+        # being written with nothing said. Every other OSError keeps its old silence.
+        with best_effort_write("reconcile snapshot", self.snapshot_path):
+            atomic_write_json(self.snapshot_path, snap, indent=0, sort_keys=True)
 
     # ---- scannable present-tense surfaces -----------------------------------------------------
     def present_tense_surfaces(self):
