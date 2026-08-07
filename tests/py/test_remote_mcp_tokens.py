@@ -2,10 +2,11 @@
 # Copyright (C) 2026 Thomas Lakofski
 """Unit tests for qq-remote-mcp's `load_tokens()` (the ACTUAL script, not a mirror) — same
 exec-the-real-script-with-mcp-stubbed technique as test_search_mcp_wiring.py's qq-search-mcp
-tests, because qq-remote-mcp imports `mcp`/`uvicorn` at module scope and this environment has
-no `mcp` package installed (uvicorn happens to be present, but the module also needs
-`mcp.server.fastmcp.FastMCP` and `mcp.server.transport_security.TransportSecuritySettings`
-just to finish importing). `__name__` is deliberately NOT "__main__", so `main()` — the only
+tests, because qq-remote-mcp imports `mcp`/`uvicorn` at module scope and neither optional
+dependency can be assumed installed (an earlier version of this suite stubbed only `mcp`
+because uvicorn happened to be present on the author's machine — that assumption failed in CI,
+so both are stubbed; the module needs `mcp.server.fastmcp.FastMCP` and
+`mcp.server.transport_security.TransportSecuritySettings` just to finish importing). `__name__` is deliberately NOT "__main__", so `main()` — the only
 thing that would bind a socket — never runs; HARD SAFETY: this suite never starts the remote
 server.
 
@@ -58,6 +59,11 @@ def _install_fake_mcp_module():
     sys.modules["mcp.server"] = fake_server
     sys.modules["mcp.server.fastmcp"] = fake_fastmcp
     sys.modules["mcp.server.transport_security"] = fake_transport
+    # uvicorn is stubbed too, unconditionally: the script only IMPORTS it at module
+    # scope (uvicorn.run lives inside main(), which never executes here), and relying
+    # on a real install made the suite host-dependent — green on the author's machine,
+    # 35 failures + 6 errors in CI, where nothing installs the optional remote deps.
+    sys.modules["uvicorn"] = types.ModuleType("uvicorn")
 
 
 def _exec_qq_remote_mcp(cwd: str, env_overrides: dict) -> dict:

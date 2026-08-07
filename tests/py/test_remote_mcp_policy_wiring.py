@@ -63,6 +63,11 @@ def _install_fake_mcp_module():
     sys.modules["mcp.server"] = fake_server
     sys.modules["mcp.server.fastmcp"] = fake_fastmcp
     sys.modules["mcp.server.transport_security"] = fake_transport
+    # uvicorn is stubbed too, unconditionally: the script only IMPORTS it at module
+    # scope (uvicorn.run lives inside main(), which never executes here), and relying
+    # on a real install made the suite host-dependent — green on the author's machine,
+    # 35 failures + 6 errors in CI, where nothing installs the optional remote deps.
+    sys.modules["uvicorn"] = types.ModuleType("uvicorn")
 
 
 def _write(path, text):
