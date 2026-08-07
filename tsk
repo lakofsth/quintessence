@@ -15,7 +15,7 @@
 #   tsk wait <name> [timeout_s]        block until job ends; exits with job rc
 #   tsk log <name>                     print job log path and tail it
 #   tsk rc <name>                      print exit code (empty if still running)
-#   tsk stop <name>                    stop the unit
+#   tsk stop <name>                    stop the unit (writes the job's rc/done marker)
 #   tsk clean [<name>|--all-finished]  remove job state
 set -uo pipefail
 STATE="${TSK_STATE:-$HOME/.local/state/tsk}"
@@ -47,7 +47,9 @@ echo "[tsk] exit rc=\$rc \$(date -Is)"
 exit \$rc
 EOF
     chmod +x "$runner"
-    systemd-run --user --unit "tsk-$name" --collect --quiet "$runner" || die "systemd-run failed"
+    systemd-run --user --unit "tsk-$name" --collect --quiet "$runner" \
+      || { rm -f "$STATE/$name".{run,cmd}; die "systemd-run failed"; }   # no state for a job
+                                            # that never started: .run present must MEAN started
     echo "started tsk-$name (log: $STATE/$name.log ; marker: $STATE/$name.done)"
     ;;
   status)
@@ -69,14 +71,32 @@ EOF
       systemctl --user is-active --quiet "$(unit "$n")" || { sleep 1; [ -f "$STATE/$n.done" ] || die "job '$n' not running and no done-marker"; break; }
       sleep 2; s=$((s+2)); [ "$t" -gt 0 ] && [ $s -ge "$t" ] && die "timeout waiting for '$n'"
     done
-    rc=$(cat "$STATE/$n.rc" 2>/dev/null || echo 1); exit "$rc"
+    rc=$(cat "$STATE/$n.rc" 2>/dev/null); [ -n "$rc" ] || rc=1   # empty rc file: degrade to
+    exit "$rc"                                                   # 1, never `exit ""` (crash)
     ;;
   log)
     n="${2:-}"; [ -n "$n" ] || die "usage: tsk log <name>"
     echo "== $STATE/$n.log =="; tail -40 "$STATE/$n.log" 2>/dev/null || echo "(no log)"
     ;;
   rc)   cat "$STATE/${2:?name}.rc" 2>/dev/null ;;
-  stop) systemctl --user stop "$(unit "${2:?name}")" ;;
+  stop)
+    n="${2:?name}"
+    systemctl --user stop "$(unit "$n")"; src=$?
+    # stop kills the runner's whole cgroup before the runner can write rc/done, so a
+    # stopped job would never mark done and watchers gating on the marker would hang.
+    # Write what the runner could not — but only when the stop verifiably ENDED the
+    # unit (systemctl succeeded AND the unit is no longer active): a failed stop must
+    # not fabricate a completion record for a job that may still be running. Keep a
+    # runner-written rc if it got a value out, else record 143 (128+SIGTERM, what
+    # systemctl stop sends); a zero-length rc file is no value.
+    if [ "$src" -eq 0 ] && ! systemctl --user is-active --quiet "$(unit "$n")" \
+       && [ -f "$STATE/$n.run" ] && [ ! -f "$STATE/$n.done" ]; then
+      [ -s "$STATE/$n.rc" ] || echo 143 > "$STATE/$n.rc"
+      echo "[tsk] stopped via 'tsk stop'; marker written rc=$(cat "$STATE/$n.rc") $(date -Is)" >> "$STATE/$n.log"
+      touch "$STATE/$n.done"
+    fi
+    exit "$src"
+    ;;
   clean)
     if [ "${2:-}" = "--all-finished" ]; then
       for f in "$STATE"/*.done; do [ -e "$f" ] || continue; n=$(basename "$f" .done); rm -f "$STATE/$n".{rc,done,cmd,log,run}; done
