@@ -23,19 +23,28 @@ mkdir -p "$STATE"
 
 die(){ echo "tsk: $*" >&2; exit 1; }
 unit(){ echo "tsk-$1.service"; }
+  # Every verb that takes a <name> validates it here, not just `run`: verbs WRITE files
+  # under paths built from the name, and delegating rejection to systemctl's unit-name
+  # rules was an accident of implementation, not a boundary of ours. (Indented on purpose:
+  # the help fallthrough harvests column-0 `# ` lines, and these are not help.)
+name_ok(){ [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] || die "name must be [A-Za-z0-9_.-]+"; }
 
 case "${1:-}" in
   run)
     shift; name="${1:-}"; shift || true; [ "${1:-}" = "--" ] && shift
     [ -n "$name" ] || die "usage: tsk run <name> [--] <command...>"
-    [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || die "name must be [A-Za-z0-9_.-]+"
+    name_ok "$name"
     [ $# -ge 1 ] || die "no command given"
     if systemctl --user is-active --quiet "$(unit "$name")"; then die "job '$name' already running"; fi
     rm -f "$STATE/$name".{rc,done}
     printf '%s\n' "$*" > "$STATE/$name.cmd"
     runner="$STATE/$name.run"
     argv_q=$(printf '%q ' "$@")
-    cat > "$runner" <<EOF
+    tmp="$STATE/$name:run.tmp.$$"   # ':' is FORBIDDEN in job names, so this glob namespace
+                                    # can never collide with any job's state files
+    trap 'rm -f "$tmp"' EXIT; trap 'rm -f "$tmp"; exit 1' INT TERM   # an interrupted run
+                                            # must not strand its temp (clean also sweeps them)
+    cat > "$tmp" <<EOF
 #!/usr/bin/env bash
 exec > "$STATE/$name.log" 2>&1
 echo "[tsk] start \$(date -Is)"
@@ -46,15 +55,29 @@ touch "$STATE/$name.done"
 echo "[tsk] exit rc=\$rc \$(date -Is)"
 exit \$rc
 EOF
-    chmod +x "$runner"
+    chmod +x "$tmp"
+    # Rename, never truncate in place: a runner bash that survived a same-name race may
+    # still be reading its inode. CHECKED rename: on failure $runner still holds the
+    # PREVIOUS run's script, and proceeding would silently execute the wrong command.
+    mv -f "$tmp" "$runner" || { systemctl --user is-active --quiet "$(unit "$name")" \
+        || rm -f "$STATE/$name".{run,cmd};   # same cleanup contract as the systemd-run
+      die "could not install runner script (nothing was started)"; }   # failure below
+    # On failure: no state for a job that never started (.run present must MEAN started) —
+    # UNLESS a same-name unit is live, i.e. this run lost the check-to-create race: deleting
+    # then would disarm the live job's stop-marker. Known residuals, recorded not hidden:
+    # the on-disk .run/.cmd then describe the loser; the pre-flight rm of .rc/.done above
+    # already destroyed a just-completed job's result record in the same lost race; and the
+    # race window itself (one manager round trip between duplicate check and unit creation)
+    # remains open. is-active also reports "activating" as inactive, so the guard can still
+    # take the delete branch inside a narrower window.
     systemd-run --user --unit "tsk-$name" --collect --quiet "$runner" \
-      || { rm -f "$STATE/$name".{run,cmd}; die "systemd-run failed"; }   # no state for a job
-                                            # that never started: .run present must MEAN started
+      || { systemctl --user is-active --quiet "$(unit "$name")" \
+             || rm -f "$STATE/$name".{run,cmd}; die "systemd-run failed"; }
     echo "started tsk-$name (log: $STATE/$name.log ; marker: $STATE/$name.done)"
     ;;
   status)
     if [ -n "${2:-}" ]; then
-      n="$2"
+      n="$2"; name_ok "$n"
       if systemctl --user is-active --quiet "$(unit "$n")"; then echo "$n: RUNNING"
       elif [ -f "$STATE/$n.done" ]; then echo "$n: DONE rc=$(cat "$STATE/$n.rc" 2>/dev/null || echo '?')"
       else echo "$n: unknown"; fi
@@ -66,21 +89,24 @@ EOF
     ;;
   wait)
     n="${2:-}"; [ -n "$n" ] || die "usage: tsk wait <name> [timeout_s]"
+    name_ok "$n"
     t="${3:-0}"; s=0
     while [ ! -f "$STATE/$n.done" ]; do
       systemctl --user is-active --quiet "$(unit "$n")" || { sleep 1; [ -f "$STATE/$n.done" ] || die "job '$n' not running and no done-marker"; break; }
       sleep 2; s=$((s+2)); [ "$t" -gt 0 ] && [ $s -ge "$t" ] && die "timeout waiting for '$n'"
     done
-    rc=$(cat "$STATE/$n.rc" 2>/dev/null); [ -n "$rc" ] || rc=1   # empty rc file: degrade to
-    exit "$rc"                                                   # 1, never `exit ""` (crash)
+    rc=$(cat "$STATE/$n.rc" 2>/dev/null); [[ "$rc" =~ ^[0-9]+$ ]] || rc=1   # empty or non-numeric
+    exit "$rc"    # rc file: degrade to 1. (An all-digit value beyond exit's range still crashes
+                  # exit — reachable only by external tampering; the runner writes \$?, 0-255.)
     ;;
   log)
     n="${2:-}"; [ -n "$n" ] || die "usage: tsk log <name>"
+    name_ok "$n"
     echo "== $STATE/$n.log =="; tail -40 "$STATE/$n.log" 2>/dev/null || echo "(no log)"
     ;;
-  rc)   cat "$STATE/${2:?name}.rc" 2>/dev/null ;;
+  rc)   n="${2:?name}"; name_ok "$n"; cat "$STATE/$n.rc" 2>/dev/null ;;
   stop)
-    n="${2:?name}"
+    n="${2:?name}"; name_ok "$n"
     systemctl --user stop "$(unit "$n")"; src=$?
     # stop kills the runner's whole cgroup before the runner can write rc/done, so a
     # stopped job would never mark done and watchers gating on the marker would hang.
@@ -99,8 +125,11 @@ EOF
     ;;
   clean)
     if [ "${2:-}" = "--all-finished" ]; then
-      for f in "$STATE"/*.done; do [ -e "$f" ] || continue; n=$(basename "$f" .done); rm -f "$STATE/$n".{rc,done,cmd,log,run}; done
-    else rm -f "$STATE/${2:?name}".{rc,done,cmd,log,run}; fi
+      for f in "$STATE"/*.done; do [ -e "$f" ] || continue; n=$(basename "$f" .done); rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.*; done
+      # Orphan temps have no .done (run's pre-flight rm removed it), so the loop above can
+      # never reach them — reclaim by AGE instead, sparing a concurrent run's in-flight temp.
+      find "$STATE" -maxdepth 1 -name '*:run.tmp.*' -mmin +60 -exec rm -f {} +
+    else n="${2:?name}"; name_ok "$n"; rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.*; fi
     ;;
   *) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
