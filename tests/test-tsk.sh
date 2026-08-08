@@ -83,6 +83,29 @@ rm -f "$TSK_STATE/$J-x.run.tmp1".*
 [ -e "$TSK_STATE/$J-new:run.tmp.2" ] && ok "all-finished spares a fresh temp" || no "all-finished ate a fresh (in-flight) temp"
 rm -f "$TSK_STATE/$J-new:run.tmp.2"
 
+# H3d (hermetic). the SAME age sweep, with TSK_STATE reached through a SYMLINK — the one
+# condition H3c cannot see, because its own TSK_STATE is a real directory (follow-up round
+# F1, ledger D114). `find` defaults to -P and will not descend a symlink named as a starting
+# point, so the sweep matched nothing, deleted nothing and exited 0: the reclamation this
+# code exists to provide, silently absent. H3c IS this pin's positive control — same command,
+# same name shape, same age, real directory — so a red here is about the symlink and nothing
+# else. A symlinked state dir is ordinary: TSK_STATE is an operator env var.
+_sl_real="$TMP/slreal"; _sl_link="$TMP/sllink"
+mkdir -p "$_sl_real"; ln -s "$_sl_real" "$_sl_link"
+: > "$_sl_real/$J-sl:run.tmp.7"; touch -d '3 hours ago' "$_sl_real/$J-sl:run.tmp.7"
+# assert the sweep has work before asking whether it did it: an empty state dir would let a
+# missing-file check report success for the wrong reason (ledger D59 — zero matches is
+# instrument failure, not a pass)
+if [ -e "$_sl_real/$J-sl:run.tmp.7" ]; then
+  TSK_STATE="$_sl_link" "$TSK" clean --all-finished
+  [ -e "$_sl_real/$J-sl:run.tmp.7" ] \
+    && no "the age sweep reclaims nothing when TSK_STATE is a symlink (find -P will not descend a symlinked starting point)" \
+    || ok "the age sweep reclaims through a symlinked TSK_STATE"
+else
+  no "H3d could not plant its fixture — the assertion below would have been vacuous"
+fi
+rm -rf "$_sl_real" "$_sl_link"
+
 # H4 (hermetic). the help surface is the verb list and nothing more (reset-round F1: a
 # column-0 rationale comment leaked into the \`^#\` harvest and printed implementation
 # commentary on every bad-verb invocation; nothing pinned that surface)
