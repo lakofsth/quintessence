@@ -23,6 +23,16 @@ export QUINTESSENCE_DIR="${QUINTESSENCE_DIR:-$HOME/quintessence}"
 export QQ_MEMDIR="${QQ_MEMDIR:-$HOME/.quintessence-memory}"
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 WIRE=0; [ "${1:-}" = "--wire-claude" ] && WIRE=1
+# --no-self-check: skip step 5. The ONE caller is tests/test-setup-wire.sh, which runs this
+# installer for real to pin its env isolation. Without the flag that is a loop -- step 5 runs
+# tests/run.sh, run.sh runs test-setup-wire.sh, test-setup-wire.sh runs this installer -- and
+# each turn also spawns a python suite, so the box fills with work while every assertion still
+# passes. Deliberately a FLAG and not an env var: run_installer launches under `env -i` with an
+# allowlist, so an env marker would be stripped exactly where it is needed, and adding one to
+# that allowlist would collide with the pin that proves the allowlist excludes every documented
+# override. Scanned separately from $1 so --wire-claude's position-1 semantics are unchanged.
+SELFCHECK=1
+for _arg in "$@"; do [ "$_arg" = "--no-self-check" ] && SELFCHECK=0; done
 
 # ---- 1. CLI on PATH (relink only if the target differs) ----------------------------------
 # `qq` is the ONE user entry point; qq-search/qq-ask stay engine-internal (exec targets for
@@ -362,7 +372,9 @@ esac
 # (human-1-store-pollution). The suites themselves also defensively unset both after their own
 # HOME isolation, so this holds even if invoked some other way.
 selfcheck_failed=0
-if [ -r "$HERE/tests/run.sh" ]; then
+if [ "$SELFCHECK" -eq 0 ]; then
+  echo; echo "Self-check skipped (--no-self-check)."
+elif [ -r "$HERE/tests/run.sh" ]; then
   echo; echo "Self-check (tests/run.sh)…"
   if out="$(env -u QUINTESSENCE_DIR -u QQ_MEMDIR bash "$HERE/tests/run.sh" 2>&1)"; then
     echo "  ✓ $(printf '%s\n' "$out" | tail -1)"
