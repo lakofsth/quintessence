@@ -57,7 +57,18 @@ _ISOLATED_ENV=(env -i
   GIT_AUTHOR_NAME=qq-tests GIT_AUTHOR_EMAIL=qq-tests@localhost
   GIT_COMMITTER_NAME=qq-tests GIT_COMMITTER_EMAIL=qq-tests@localhost)
 run_installer() {   # VAR=VALUE... — launch setup.sh --wire-claude in its own process group; $! is it
-  setsid "${_ISOLATED_ENV[@]}" "$@" bash "$ENGINE/setup.sh" --wire-claude >/dev/null 2>&1 &
+  # --no-self-check breaks the loop this suite would otherwise close: setup.sh's step 5 runs
+  # tests/run.sh, run.sh runs THIS suite, and this suite runs setup.sh. Every assertion still
+  # passed while it happened, so nothing failed and nothing reported it — see the case at the
+  # foot of this file, which pins the flag's effect rather than trusting this line.
+  setsid "${_ISOLATED_ENV[@]}" "$@" bash "$ENGINE/setup.sh" --wire-claude --no-self-check >/dev/null 2>&1 &
+}
+
+# Same launcher, output CAPTURED instead of discarded — used only by the recursion case, which
+# has to read what the installer said about step 5.
+run_installer_logged() {   # logfile VAR=VALUE...
+  local _log=$1; shift
+  setsid "${_ISOLATED_ENV[@]}" "$@" bash "$ENGINE/setup.sh" --wire-claude --no-self-check >"$_log" 2>&1 &
 }
 
 # Every environment variable the installer honours, READ OUT OF THE ESTATE rather than written
@@ -738,6 +749,32 @@ elif [ ! -s "$TMP/home/.config/quintessence/config" ]; then
   no "the installer never wrote a config under the isolated HOME (poll expired after 10s) — the canary check cannot be told from an installer that did nothing, so it is reported as unproven rather than as a pass"
 else
   ok "the installer with every documented override exported at a decoy leaves all of them byte-identical, and writes its config under the isolated HOME instead"
+fi
+
+# --- the installer this suite runs must not re-enter the suite -------------------------------
+# Found live 2026-08-08: setup.sh step 5 runs tests/run.sh, run.sh runs this file, this file runs
+# setup.sh. The loop is bounded only by the 120s timeout on each launch, so it drains rather than
+# running away — which is why it was invisible for weeks: every suite still PASSED, CI went green
+# on it, and the only symptom was wall-clock (a 3m17s shell suite) and load on a busy box.
+# A diff reviewer sees two reasonable files; a pass/fail gate sees green. So the pin is behavioural
+# and reads what the installer actually did with step 5.
+_rlog="$TMP/no-self-check.out"
+mkdir -p "$TMP/recurse-home/.claude"
+run_installer_logged "$_rlog" HERE="$ENGINE" \
+  CLAUDE_SETTINGS="$TMP/recurse-home/.claude/settings.json"
+_rpid=$!
+for _ in $(seq 1 200); do kill -0 "$_rpid" 2>/dev/null || break; sleep 0.1; done
+kill -- -"$_rpid" 2>/dev/null   # process group: setsid above made it one
+wait "$_rpid" 2>/dev/null
+
+# Two halves, and the second is what stops a vacuous pass: absence of the run marker alone would
+# also be "true" if the installer died before reaching step 5, so the skip line must be PRESENT.
+if grep -q 'Self-check (tests/run.sh)' "$_rlog" 2>/dev/null; then
+  no "setup.sh --no-self-check STILL ran the suite — the installer this file launches re-enters this file (setup.sh step 5 -> tests/run.sh -> test-setup-wire.sh -> setup.sh)"
+elif ! grep -q 'Self-check skipped' "$_rlog" 2>/dev/null; then
+  no "setup.sh --no-self-check never reached step 5 at all — the absence of a nested run proves nothing here, so this pin is refusing to certify it (see $_rlog)"
+else
+  ok "the installer launched by this suite skips its own self-check, so running this file cannot re-enter it"
 fi
 
 printf -- '----- %d passed, %d failed -----\n' "$pass" "$fail"
