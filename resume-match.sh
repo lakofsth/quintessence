@@ -35,7 +35,9 @@ prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null) || exit 0
 sid=$(printf '%s' "$input" | jq -r '.session_id // "nosession"' 2>/dev/null) || sid="nosession"
 tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null) || tp=""
 
-find "$qd" -maxdepth 1 \( -name '.hinted-*' -o -name '.kb-primed-*' \) -mtime +1 -delete 2>/dev/null || true
+# -H: dereference the starting point; find's default -P will not descend a symlinked $qd, so a
+# symlinked store leaves these sentinels un-tidied forever (ledger D114, same class as tsk's sweep).
+find -H "$qd" -maxdepth 1 \( -name '.hinted-*' -o -name '.kb-primed-*' \) -mtime +1 -delete 2>/dev/null || true
 
 # (1) PRIME THE KB'S EXISTENCE once per session — the affordance index: tell a cold session it
 # CAN reach the KB and self-query, so capability is discoverable even when nothing matches below.

@@ -495,7 +495,7 @@ if [ "$litter_planted" -eq 1 ] && [ "$litter_landed" -eq 1 ]; then
   # is already wired so there is nothing to poll for. `timeout` bounds a version that hangs.
   _out="$(timeout 120 "${_ISOLATED_ENV[@]}" HERE="$ENGINE" \
             CLAUDE_SETTINGS="$TMP/litter/.claude/settings.json" \
-            bash "$ENGINE/setup.sh" --wire-claude 2>&1)"
+            bash "$ENGINE/setup.sh" --wire-claude --no-self-check 2>&1)"
   case "$_out" in
     *"already wired to this dist (no change)"*)
       [ ! -e "$TMP/litter/.claude/$_gen_name" ] \
@@ -573,7 +573,7 @@ LEAKPATCH
 _out="$(timeout 120 "${_ISOLATED_ENV[@]}" PYTHONPATH="$TMP/leakpatch" \
           QQ_TEST_CLOSE_RECORD="$TMP/leak/closes" HERE="$ENGINE" \
           CLAUDE_SETTINGS="$TMP/leak/.claude/settings.json" \
-          bash "$ENGINE/setup.sh" --wire-claude 2>&1 || true)"
+          bash "$ENGINE/setup.sh" --wire-claude --no-self-check 2>&1 || true)"
 _closes="$(cat "$TMP/leak/closes" 2>/dev/null || true)"
 case "$_out" in
   *KeyboardInterrupt*) : ;;   # the injection reached the block, which is the whole experiment
@@ -611,7 +611,7 @@ for _case in "existing 23" "fresh 17"; do
   # gate. Same allowlist as run_installer, from the same array.
   _out="$(timeout 60 "${_ISOLATED_ENV[@]}" HERE="$ENGINE" \
             CLAUDE_SETTINGS="$TMP/long$_kind/.claude/$_long" \
-            bash "$ENGINE/setup.sh" --wire-claude 2>&1)"
+            bash "$ENGINE/setup.sh" --wire-claude --no-self-check 2>&1)"
   case "$_out" in
     *Traceback*)
       no "a ${#_long}-byte CLAUDE_SETTINGS basename ($_kind target) gives a raw traceback where the 4-byte .tmp idiom succeeded — ASSURANCE promises the refusal is loud and states the arithmetic, and that was true of the engine only" ;;
@@ -646,7 +646,7 @@ ln -s "$TMP/cycle/.claude/settings.json" "$TMP/cycle/.claude/settings-b.json"
 # wedge the gate.
 _out="$(timeout 60 "${_ISOLATED_ENV[@]}" HERE="$ENGINE" \
           CLAUDE_SETTINGS="$TMP/cycle/.claude/settings.json" \
-          bash "$ENGINE/setup.sh" --wire-claude 2>&1)"
+          bash "$ENGINE/setup.sh" --wire-claude --no-self-check 2>&1)"
 case "$_out" in
   *"symlink cycle"*)
     ok "a settings.json that is a symlink cycle is refused AS a cycle" ;;
@@ -775,6 +775,40 @@ elif ! grep -q 'Self-check skipped' "$_rlog" 2>/dev/null; then
   no "setup.sh --no-self-check never reached step 5 at all — the absence of a nested run proves nothing here, so this pin is refusing to certify it (see $_rlog)"
 else
   ok "the installer launched by this suite skips its own self-check, so running this file cannot re-enter it"
+fi
+
+# --- and nothing in this suite may launch the installer without the flag ----------------------
+# The pin above proves the FLAG suppresses step 5. It does not prove anything USES it, and that
+# gap is the whole defect: --no-self-check was added to the two background launchers on the first
+# pass while FOUR foreground call sites in this same file went on invoking the installer without
+# it. The cycle kept running, every case kept passing, and the pin above stayed green throughout.
+# So this second pin enumerates the launches rather than trusting the ones it knows about — a call
+# site written next Tuesday is covered on the day it is written, not on the day someone remembers.
+#
+# What it does NOT reach, stated so a green here is not read as more than it is: this is a TEXTUAL
+# enumeration of `bash "$ENGINE/setup.sh"` / `bash "$HERE/setup.sh"`. A launch spelled any other
+# way — unquoted, through a variable, via `sh` or `env` — is invisible to it. That is why the
+# behavioural pin above stays: the two fail in different directions. This file also reads its own
+# source, so the pattern below is written not to match its own text; the zero-match branch is what
+# catches it if that ever stops being true.
+_launch_total=0
+_launch_bare=""
+for _f in "$ENGINE"/tests/*.sh; do
+  while IFS= read -r _line; do
+    _launch_total=$((_launch_total + 1))
+    case "$_line" in
+      *--no-self-check*) : ;;
+      *) _launch_bare="$_launch_bare    ${_f##*/}:$_line"$'\n' ;;
+    esac
+  done < <(grep -hnE 'bash "\$(ENGINE|HERE)/setup\.sh"' "$_f" | grep -vE '^[0-9]+:[[:space:]]*#')
+done
+
+if [ "$_launch_total" -eq 0 ]; then
+  no "the enumeration of installer launches across tests/*.sh matched NOTHING — this suite no longer launches setup.sh in a form this pin can see, so a pass here would be certifying an empty set rather than a property"
+elif [ -n "$_launch_bare" ]; then
+  no "$_launch_total installer launch(es) enumerated across tests/*.sh, and these bypass --no-self-check, re-opening the setup.sh -> tests/run.sh -> this file -> setup.sh cycle:"$'\n'"$_launch_bare"
+else
+  ok "all $_launch_total installer launches across tests/*.sh carry --no-self-check"
 fi
 
 printf -- '----- %d passed, %d failed -----\n' "$pass" "$fail"

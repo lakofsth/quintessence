@@ -128,7 +128,12 @@ EOF
       for f in "$STATE"/*.done; do [ -e "$f" ] || continue; n=$(basename "$f" .done); rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.*; done
       # Orphan temps have no .done (run's pre-flight rm removed it), so the loop above can
       # never reach them — reclaim by AGE instead, sparing a concurrent run's in-flight temp.
-      find "$STATE" -maxdepth 1 -name '*:run.tmp.*' -mmin +60 -exec rm -f {} +
+      # -H dereferences the STARTING POINT only. Without it find defaults to -P, which will not
+      # descend a symlink named on the command line, so a symlinked TSK_STATE made this sweep
+      # match nothing, delete nothing and exit 0 — silently no reclamation at all (H3d pins it).
+      # -H and not -L on purpose: symlinks INSIDE the directory stay unfollowed, so a temp-named
+      # symlink is unlinked rather than followed to whatever it points at.
+      find -H "$STATE" -maxdepth 1 -name '*:run.tmp.*' -mmin +60 -exec rm -f {} +
     else n="${2:?name}"; name_ok "$n"; rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.*; fi
     ;;
   *) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
