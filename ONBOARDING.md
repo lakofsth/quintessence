@@ -35,9 +35,10 @@ end. `qq help` lists everything.
    different discipline: you edit those files directly with `Edit`/`Write` (see "Don't confuse
    quintessence with…" below) – that is not an exception to this rule, it's a different store. For
    HEADs: a raw `git` commit in the store is refused (by the hooks `qq init` installs); a direct
-   `Edit`/`Write` is not refused at write time, but it is not a write either – it sits
-   unattributed and gets silently folded into the next `qq` commit. Drive every HEAD
-   change through a verb so it lands with authorship and history.
+   `Edit`/`Write` is not refused at write time, but it is not a write either – the next
+   `qq` write to that file commits it separately as an unattributed "absorb out-of-band
+   edit" before its own change, so hand-edited content survives but is visibly NOT qq's.
+   Drive every HEAD change through a verb so it lands with authorship and history.
 2. **Update vs rewrite.** `qq update` for a note; `qq rewrite` only to replace a whole HEAD. `rewrite` takes the
    *entire* file on stdin (seed from `qq show <topic>`), and if another session changed the HEAD
    since this command started, it refuses (exit 3) instead of clobbering –

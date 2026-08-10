@@ -361,9 +361,10 @@ class TestWriteVerbsAreNative(DispatcherHarness):
     (quintessence.write) against a REAL git store this harness initializes itself (unlike the
     read/check-family harnesses above, the write path needs a real `.git` to commit into — the
     fake qq-legacy stub is only there to prove NON-delegation, never actually exercised for
-    these verbs). Byte-level parity against the bash engine is covered separately by
-    tests/test-write-parity.sh (a genuine qq-legacy-vs-python fixture diff); these tests pin
-    the DISPATCH/native-vs-delegate boundary and the basic verb contracts."""
+    these verbs). Byte-level parity against the bash engine was once covered by
+    tests/test-write-parity.sh; that suite left the tree with the bash engine, and no
+    cross-engine parity coverage exists anymore. These tests pin the
+    DISPATCH/native-vs-delegate boundary and the basic verb contracts."""
 
     def setUp(self):
         super().setUp()

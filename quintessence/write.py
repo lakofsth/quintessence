@@ -44,10 +44,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import authgate
+from . import agentid, authgate
 from .checks import compute_index_text
 from .findings import Finding
-from .heads import UpdateItem, count_update_markers, parse as parse_head
+from .heads import (FENCE_CLOSED, UpdateItem, canonical_newlines, count_update_markers,
+                    fence_toggle, is_body_header, is_essence_marker, is_update_marker,
+                    parse as parse_head, split_stamped, stamp_datetime, stamp_of,
+                    update_lines as head_update_lines, update_marker_flags)
 from .refs import bind_write
 from .store import LockTimeout, Store, acquire_flock, state_lock
 
@@ -191,13 +194,36 @@ def commit_push(store: Store, msg: str, paths: list[str]) -> tuple[bool, Optiona
     of THIS `git commit` invocation and inherit ITS env, so they still see the marker — the
     narrowing is that nothing else does."""
     qdir = str(store.qdir)
-    status = subprocess.run(["git", "-C", qdir, "status", "--porcelain", "--", *paths],
+    # -z so odd path names parse exactly, and per-entry XY status so staging is asked for only
+    # where staging is NEEDED (0845bb0 review finding): a FULLY-STAGED change (index column set,
+    # worktree column blank — e.g. an out-of-band `git rm`, which no hook blocks) has nothing on
+    # disk for `git add`'s pathspec to match, so the old blanket add exited 128 and WEDGED every
+    # sweep-carrying verb until the index was resolved by hand. Staged state needs no add — the
+    # commit below picks it up by path. What this function CANNOT do is make a staged rename
+    # whole on its own: a status scoped to the new name reports a plain 'A' with no origin
+    # field (git pairs the halves only when the pathspec already covers both), so the caller
+    # that can see the rename — the sweep, via its UNSCOPED porcelain — must put the origin in
+    # `paths` itself (_absorb_out_of_band's `also=`). The 8babe64 review caught this function's
+    # first draft carrying an origin-collecting branch that was doubly dead: it could only
+    # fire when the origin was already in `paths`, into a list nothing consumed.
+    status = subprocess.run(["git", "-C", qdir, "status", "--porcelain", "-z", "--", *paths],
                              capture_output=True, text=True)
-    if not status.stdout.strip():
+    entries = [e for e in status.stdout.split("\0") if e]
+    need_add: list[str] = []
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        xy, rel = entry[:2], entry[3:]
+        if xy and xy[0] in "RC":
+            i += 1                                # the origin path is its own NUL field — skip
+        if xy[1:2] != " " or xy == "??":          # worktree-side change: staging needed
+            need_add.append(rel)
+    if not entries:
         return False, f"qq: no changes to commit for {' '.join(paths)}"
-    add = subprocess.run(["git", "-C", qdir, "add", "--", *paths], capture_output=True,
-                          preexec_fn=_preexec())
-    if add.returncode != 0:
+    add = subprocess.run(["git", "-C", qdir, "add", "--", *need_add], capture_output=True,
+                          preexec_fn=_preexec()) if need_add else None
+    if add is not None and add.returncode != 0:
         err = (add.stderr or b"").decode("utf-8", "replace").strip()
         if "index.lock" in err:
             raise WriteError(
@@ -275,8 +301,14 @@ def _write_index_file(store: Store) -> None:
 
 # ---- qq-write engine (a port of the qq-write transaction; the legacy binary stays as an
 # escape hatch) ----------------------------------------------------------------------------------
-_ISO_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T")
 # Caller-supplied timestamp forms stripped so qq (not the writer) owns the update-line stamp.
+# These two are the tree's ONLY deliberately non-reader spellings of anything stamp-shaped
+# (named as such in heads.py's module docstring): DELIBERATELY LOOSER than the reader's grammar
+# (whitespace- and case-tolerant, fractional seconds) because they are courtesy STRIPPERS for
+# sloppy imitations of `qq show` output, not guards or acceptances. Stripping MORE than the
+# reader parses is the safe direction — whatever they fail to strip lands as prose AFTER the
+# stamp `_normalize_prepend_first_line` composes, where no reader parses it. Acceptance
+# decisions must never be spelled this way (see _first_line_keepable_stamp).
 _UPDATED_MARKER_RE = re.compile(r"^\s*>\s*updated:\s*", re.IGNORECASE)
 _LEADING_ISO_RE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}T[0-9:]+(?:\.\d+)?Z?\s*")
 # A rewrite whose content carries an update stamp THIS far in the future is treated as fabricated,
@@ -295,27 +327,41 @@ def _strip_caller_stamp(content: str) -> str:
     parts = content.split("\n", 1)
     first = parts[0]
     rest = ("\n" + parts[1]) if len(parts) > 1 else ""
-    stripped = _UPDATED_MARKER_RE.sub("", first, count=1)
-    stripped = _LEADING_ISO_RE.sub("", stripped, count=1)
+    stripped = first
+    while True:
+        # To a FIXPOINT, not once. Stripping a single `> updated: ` left a SECOND one intact, and
+        # _normalize_prepend_first_line returns any '>'-leading line verbatim — so
+        # `qq update t "> updated: > updated: 2030-01-01T00:00:00Z x"` landed the caller's 2030
+        # stamp, which then wins the newest-line sort, owns the menu's UPDATED column and the
+        # digest's age ranking until 2030. Pre-existing; it became worth fixing here because the
+        # derived marker now sits on that line and makes a forgery read as machine-attested.
+        after = _UPDATED_MARKER_RE.sub("", stripped, count=1)
+        after = _LEADING_ISO_RE.sub("", after, count=1)
+        if after == stripped:
+            break
+        stripped = after
     return f"{stripped}{rest}"
 
 
 def _future_stamp_lines(content: str) -> "list[str]":
-    """`> updated: <ISO8601Z>` lines in `content` whose stamp is more than the grace window in the
-    FUTURE vs now() — the fabricated-timestamp guard for `qq rewrite` (a future stamp wins the
-    newest-line sort). Malformed/unparseable stamps are ignored (not this guard's job)."""
+    """Real update-lines in `content` whose reader-parsed stamp is more than the grace window
+    in the FUTURE vs now() — the fabricated-timestamp guard for `qq rewrite` (a future stamp
+    wins the newest-line sort).
+
+    The guard's grammar IS the reader's (2026-08-09 ruling): it walks heads.update_lines — so
+    an indented quoted line no longer trips it (round-five finding (b): `qq show | qq rewrite`
+    refused a HEAD whose own neutralized quote was indented), a fenced or body-region example
+    is legal to quote, and a future DATE-ONLY stamp (`2032-01-01`), which the reader parses
+    and ranks by, is now refused where the old spelling let it through. A stamp the reader
+    cannot parse is not refused because it cannot misreport: every ranking surface derives its
+    epoch from this same parse, so an unparseable stamp ranks as no stamp at all."""
     cutoff = datetime.now(timezone.utc) + _FUTURE_STAMP_GRACE
     bad = []
-    for ln in content.splitlines():
-        m = re.match(r"^\s*>\s*updated:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z", ln)
-        if not m:
-            continue
-        try:
-            ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if ts > cutoff:
-            bad.append(ln.strip())
+    for item in head_update_lines(content):
+        ts = item.timestamp
+        dt = stamp_datetime(ts) if ts else None
+        if dt is not None and dt > cutoff:
+            bad.append(item.marker.strip())
     return bad
 
 
@@ -347,6 +393,70 @@ def _normalize_target(store: Store, target: str) -> str:
     return rel
 
 
+def _first_line_keepable_stamp(first: str) -> bool:
+    """Should the composer KEEP `first`'s leading text as the update-line's own timestamp?
+    The acceptance is the reader's grammar (heads.stamp_of), narrowed two ways the reader is
+    not: the stamp must carry a time (a bare leading date is overwhelmingly prose — a note that
+    happens to open with '2026-08-09 was the day …' must not become a stamp), and it must be
+    delimited from what follows by whitespace or end-of-line. Until the d78810c review this was
+    `_ISO_PREFIX_RE` = `^\\d{4}-\\d{2}-\\d{2}T` — an acceptance LOOSER than the reader, which is
+    the divergence class the reader unification exists to close: `2099-12-31Team offsite`
+    slipped the courtesy stripper (no parseable time), passed this branch (date + `T` + any
+    char), and landed as a date-only 2099 stamp the reader ranked by until 2099. Narrower than
+    the reader means the rejected shape becomes inert prose behind a fresh stamp; looser meant
+    a forged stamp. Fractional-seconds and abutting variants are prose to the reader
+    (split_stamped rejects them for the same reason), so they are prose here too."""
+    ts = stamp_of(first)
+    if not ts or "T" not in ts:
+        return False
+    return len(first) == len(ts) or first[len(ts)].isspace()
+
+
+def _neutralize_caller_update_lines(content: str) -> str:
+    """Move any line of CALLER content that the reader would treat as HEAD structure one step
+    out of the reader's grammar, so the only structure a `qq update` can add is the one line qq
+    composes itself.
+
+    This replaces three rounds of trying to RECOGNISE forged stamps, which does not work and
+    could not have: each round closed one stamp spelling and the next round found another. It
+    asks the reader's own questions instead — with ONE reader (heads._classify, 2026-08-09
+    ruling) there is exactly one set of questions, and a new stamp format cannot reopen this,
+    because no stamp is ever examined.
+
+    Three line shapes are structure to the reader, and each gets the smallest visible nudge
+    that makes it prose:
+    - a column-0 `> updated:` line would BE an update-line → indented one space;
+    - a column-0 `> essence:` line would WIN the menu's first-essence-wins column (it lands
+      above the real essence) → indented one space;
+    - a column-0 `## ` line would END the header region, making every OLDER update-line below
+      it body — invisible to count, brief, menu and digest at once → indented one space.
+    A line inside a caller-supplied fence is already inert to the reader and is left exactly as
+    written — fencing a quoted example is the clean way to quote one. But a fence the caller
+    OPENS and never closes would swallow the rest of the HEAD the same way a stray `## ` would,
+    and indenting cannot neutralize a fence (the fence grammar accepts any indent) — so a
+    dangling fence is CLOSED with a visible closing-fence line appended after the content.
+
+    Nothing is refused and nothing is deleted; what the caller wrote lands, visibly. The FIRST
+    line is exempt from all of it: `qq update` composes that line itself
+    (`_normalize_prepend_first_line` prefixes any non-update-line first line, so a fence or
+    `## ` spelling there ends up mid-line, out of every grammar), and its fence state cannot
+    leak because the composed line never begins a fence."""
+    lines = content.split("\n")
+    out = [lines[0]]
+    state = FENCE_CLOSED
+    for ln in lines[1:]:
+        in_fence = state[0]
+        state = fence_toggle(ln, state)
+        if not in_fence and (is_update_marker(ln) or is_essence_marker(ln)
+                             or is_body_header(ln)):
+            out.append(" " + ln)
+        else:
+            out.append(ln)
+    if state[0]:
+        out.append(state[1] * state[2])
+    return "\n".join(out)
+
+
 def _normalize_prepend_first_line(content: str) -> str:
     """qq-write's prepend "safety net": the FIRST piped line must start with '> updated:
     <ISO8601>'. Already '>'-prefixed -> verbatim. Starts with an ISO8601 date+T -> just add the
@@ -354,12 +464,148 @@ def _normalize_prepend_first_line(content: str) -> str:
     now. Only the first line is ever touched; continuation lines ride along verbatim (this is
     why the whole `content` string is manipulated, not just its first line in isolation)."""
     first = content.split("\n", 1)[0]
-    if first.startswith(">"):
+    # The reader's marker test, not `startswith(">")`. Any '>'-leading first line used to pass
+    # through verbatim on the assumption it was an already-stamped update-line — so
+    # `qq update t $'> essence: x\n> updated: <forged> y'` produced content qq never stamped at
+    # all, and the caller's second line became the HEAD's newest update-line. That assumption is
+    # the root the forgery grew from; only a real update-line is left alone now. (First-line
+    # context: no fence or body state can precede line one, so the bare predicate IS the
+    # reader's answer here.)
+    if is_update_marker(first):
         return content
-    if _ISO_PREFIX_RE.match(first):
+    if _first_line_keepable_stamp(first):
         return f"> updated: {content}"
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"> updated: {ts} {content}"
+
+
+# A marker this module wrote, in the shape agentid.marker() produces. Matched by SHAPE rather
+# than by value so a marker from any session is recognised — deliberately narrow (a model-id
+# charset and an 8-char id), so ordinary prose that merely opens with a bracket, `[[wiki-link]]`
+# most of all, is left alone.
+# The session half MUST admit everything `agentid._SID_RE` does — `.`, `_` and `-` included.
+# Hand-respelling it as `[0-9A-Za-z]{1,64}` (the first version) meant any id with a dash in
+# its first 8 characters produced a marker this could not strip, reintroducing the very
+# double-stamp it exists to prevent. Unreachable under a uuid; the module's contract is that
+# the environment is not trusted to supply one. Bounded at 8 because `marker()` emits
+# `sid[:8]` and can produce nothing longer — every character of slack here is prose this
+# eats. Residual, accepted: an agent-authored line opening with a bracketed phrase of the
+# same shape (`[wip, session hand-off] ...`) still loses that phrase. A human's write is
+# never touched, and agents are told not to type markers at all.
+_AGENT_MARKER_RE = re.compile(
+    r"^\[[0-9A-Za-z][0-9A-Za-z._:\[\]-]{0,63}, session [0-9A-Za-z][0-9A-Za-z._-]{0,7}\]\s*")
+
+
+def _insert_agent_marker(content: str) -> str:
+    """Put the writing session's derived identity between an update-line's stamp and its text:
+    `> updated: <ISO> [<model>, session <id8>] <text>`.
+
+    After the stamp rather than at the end of the line, and the reason first given for that was
+    wrong: it said `head_meta()` feeds the menu's UPDATED column from this line verbatim, so a
+    trailing marker would go unseen. `head_meta` (heads.py) in fact returns EVERYTHING after
+    `> updated: `, so a trailing marker would appear in that column too. The constraint that
+    decided it at the time was `cli._epoch_of`, which then took the first date-shaped run
+    ANYWHERE in the line — a marker placed before the stamp would have captured the digest's age
+    ranking the moment a model id contained something date-shaped. Since the 2026-08-09 reader
+    unification `_epoch_of` reads only the leading stamp, so that hazard is gone; the placement
+    stays because it is now load-bearing the other way (the stamp must stay leading for the
+    reader to parse it) and because continuation lines make "the end of the line" mid-thought as
+    often as not, which is the remaining argument against trailing.
+
+    The cost, stated because it is paid on every row: `qq menu` and INDEX.md now carry the marker
+    between the stamp and the essence text.
+
+    Nothing downstream is disturbed by the insertion: `UpdateItem.timestamp` and `_epoch_of`
+    both read the ISO stamp that still leads the line, which is what the refs join (B2) and the
+    digest's age ranking are keyed on.
+
+    Fail-soft in both directions — no agent session, or a first line that is not a stamped
+    update-line, leaves `content` exactly as it arrived."""
+    mk = agentid.marker()
+    if not mk:
+        return content
+    parts = content.split("\n", 1)
+    rest = ("\n" + parts[1]) if len(parts) > 1 else ""
+    stamped = split_stamped(parts[0])   # the reader's own stamp spans — see heads.split_stamped
+    if stamped is None:
+        return content
+    # Drop ANY existing marker of this shape, not just one this session would have written. The
+    # first version compared against `mk` itself, which made "cannot double-stamp" true only for a
+    # replay by the same model. It is not: the authoring gate's documented ratification path is a
+    # DIFFERENT session replaying a queued proposal through the same verb, so the common case is
+    # exactly the one that slipped through — `[opus…] [sonnet…] the drafted claim`. A session
+    # resumed onto another model replaying its own earlier text does the same.
+    lead, text = stamped
+    while True:                       # every leading marker, not one: a line doubled by the
+        stripped = _AGENT_MARKER_RE.sub("", text, count=1)   # earlier bug must come back clean
+        if stripped == text:
+            break
+        text = stripped
+    text = text.lstrip()
+    return f"{lead}{mk} {text}{rest}"
+
+
+def _absorb_out_of_band(store: Store, rel: str, also: "Optional[list[str]]" = None) -> None:
+    """Commit any uncommitted out-of-band change to `rel` as its own absorb commit. Call
+    UNDER the write lock, before the verb's own read-modify-write, so the verb's commit
+    contains only what qq composed. Path-scoped: only `rel` is examined and committed, so a
+    concurrent stray edit to a DIFFERENT file stays put for its own verb to absorb. A clean
+    file is a no-op.
+
+    `also`: extra paths that are part of THE SAME out-of-band change and must ride the same
+    commit — today the origin half of a staged rename, which only the sweep's UNSCOPED
+    porcelain can see (a status scoped to the new name reports a plain 'A' with no origin
+    field, so commit_push alone would commit the addition half and leave the staged deletion
+    behind to wedge the next verb — 0845bb0 review finding)."""
+    dirty = subprocess.run(
+        ["git", "-C", str(store.qdir), "status", "--porcelain", "--", rel],
+        capture_output=True, text=True)
+    if dirty.stdout.strip():
+        commit_push(store, f"qq: absorb out-of-band edit to {rel}", [rel, *(also or [])])
+
+
+def _in_index_scope(rel: str) -> bool:
+    """A path INDEX.md derives a line from: a top-level HEAD file, not INDEX itself."""
+    return "/" not in rel and rel.endswith(".md") and rel != "INDEX.md"
+
+
+def _absorb_all_heads_out_of_band(store: Store) -> None:
+    """Absorb EVERY hand-edited (or hand-created) top-level HEAD, each as its own absorb
+    commit — for the verbs that COMMIT a regenerated INDEX.md (finalize, delete, `qq check
+    --write`'s reindex fix). Thomas's 2026-08-10 ruling, closing the f1a0a14 review's
+    residual: INDEX.md re-derives a line from every HEAD, so path-scoped absorption let an
+    index commit carry content from a DIFFERENT, still-dirty HEAD before that HEAD's own
+    history recorded it. Swept first, the rule is global: anything committed is either
+    qq-composed or a visibly-absorbed hand edit.
+
+    Scope = what the index derives from: top-level *.md except INDEX.md itself (INDEX is
+    derived — regeneration, not absorption, is its truth). A rename can cross that boundary
+    in either direction, so the scope test runs on BOTH halves and the in-scope half decides
+    absorption — testing only the destination dropped a top-level→subdirectory `git mv`
+    whole, leaving the staged rename for every future sweep to drop identically. The bare
+    `qq reindex` verb is NOT a call site on purpose: it never commits, so it puts nothing
+    into history to attribute. Call under the write lock."""
+    porcelain = subprocess.run(
+        ["git", "-C", str(store.qdir), "status", "--porcelain", "-z"],
+        capture_output=True, text=True)
+    entries = [e for e in porcelain.stdout.split("\0") if e]
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        status, rel = entry[:2], entry[3:]
+        origin: "Optional[str]" = None
+        if status and status[0] in "RC":
+            if i < len(entries):   # rename/copy: the next NUL field is the ORIGIN path —
+                origin = entries[i]   # it rides the same absorb commit (one change, two paths)
+                i += 1
+        rel_ok = _in_index_scope(rel)
+        origin_ok = origin is not None and _in_index_scope(origin)
+        if not rel_ok and not origin_ok:
+            continue
+        primary = rel if rel_ok else origin
+        other = origin if rel_ok else rel
+        _absorb_out_of_band(store, primary, also=[other] if other is not None else None)
 
 
 def _shrink_guard(abs_path: Path, new_content: str, rel: str, topic_hint: str) -> None:
@@ -534,17 +780,18 @@ def _execute_write(store: Store, target: str, content: str, *, msg: Optional[str
                 f"qq-write: {rel} disappeared while waiting for the write lock (a concurrent "
                 f"session deleted it) — nothing written. See journal/{topic_hint}/ to recover.", 1)
 
-        # Absorb an out-of-band edit before REPLACE overwrites it (2026-07-29 review, lock-2):
-        # an uncommitted stray edit to `rel` would otherwise be destroyed with no trace — not
-        # even in git history. Committing it here is the "silently folded into the next
-        # legitimate qq commit" the docs promise; a `--base`-guarded caller then refuses below
-        # (rel moved since base), so the writer re-reads and sees the absorbed content.
-        if not prepend and abs_path.is_file():
-            dirty = subprocess.run(
-                ["git", "-C", str(store.qdir), "status", "--porcelain", "--", rel],
-                capture_output=True, text=True)
-            if dirty.stdout.strip():
-                commit_push(store, f"qq: absorb out-of-band edit to {rel}", [rel])
+        # Absorb an out-of-band edit BEFORE this verb's own write lands (2026-07-29 review
+        # lock-2, extended to the prepend path 2026-08-09 by Thomas's ruling). Two reasons,
+        # one per mode: on REPLACE an uncommitted stray edit would otherwise be destroyed with
+        # no trace, not even in git history; on PREPEND it would survive on disk but ride this
+        # write's commit — attributed to the writing session forever, which matters because
+        # git's introducing commit is the store's provenance layer (the write-lock hook keeps
+        # raw commits out, so "who wrote this line" is answered by history — but only if a
+        # hand edit gets its OWN absorb commit instead of hiding inside a legitimate one).
+        # A `--base`-guarded caller then refuses below (rel moved since base), so the writer
+        # re-reads and sees the absorbed content.
+        if abs_path.is_file():
+            _absorb_out_of_band(store, rel)
 
         before = _rev_parse_head(store.qdir)
         if base is not None:
@@ -626,8 +873,11 @@ def update(store: Store, topic: str, content: str, refs: Optional[list[str]] = N
     and diverted to the queue instead of landing."""
     gate_recheck = None
     if content:
+        content = canonical_newlines(content)    # the readers' line model, BEFORE any line decision
         content = _strip_caller_stamp(content)   # qq owns the stamp — ignore any caller timestamp
+        content = _neutralize_caller_update_lines(content)   # ...and owns the only update-line
         content = _normalize_prepend_first_line(content)
+        content = _insert_agent_marker(content)  # ...and owns the attribution, for the same reason
         reason = authgate.gate_reason(store.config, topic)
         if reason is not None:
             if _gate_target_exists(store, topic):
@@ -656,10 +906,16 @@ def new(store: Store, topic: str, essence_arg: str, refs: Optional[list[str]] = 
     reason = authgate.gate_reason(store.config, topic)
     if reason is not None:
         _gate_divert(store, "new", topic, essence_arg, reason)
+    essence_arg = _neutralize_caller_update_lines(canonical_newlines(essence_arg))
     ess = essence_arg if essence_arg else "<one-line essence: what this thread is about>"
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # The scaffold's "(created)" IS an update-line, so it carries the writing session's identity
+    # like any other (see _insert_agent_marker). Composed here rather than run through that helper
+    # because the scaffold is built whole; empty off-harness, leaving the bash template's bytes.
+    mk = agentid.marker()
+    created = f"{mk} (created)" if mk else "(created)"
     content = (f"# Quintessence — {topic}\n"
-               f"> updated: {ts} (created)\n"
+               f"> updated: {ts} {created}\n"
                f"> essence: {ess}\n\n"
                f"## RE-ENTER HERE\n\n"
                f"## Notes\n")
@@ -699,6 +955,8 @@ def rewrite(store: Store, topic: str, content: str, refs: Optional[list[str]] = 
     at MAX_REFS independently — rewrite is the rare verb, the cap exists per-line-of-claims)."""
     if not store.has_head(topic):
         raise WriteError(f"qq rewrite: no HEAD '{topic}' (qq new {topic} first)", 1)
+    content = canonical_newlines(content)   # BEFORE the guard: a \r-hidden line is real to every
+    # text-mode reader, so the guard must see it as its own line too (round-five finding (a))
     # FUTURE-STAMP GUARD: refuse a whole-file replace carrying a fabricated FUTURE '> updated:'
     # stamp (it would win the newest-line sort and misreport state). --allow-future is the escape
     # hatch for a DELIBERATE timestamp repair/migration (e.g. correcting an earlier bad stamp).
@@ -711,7 +969,7 @@ def rewrite(store: Store, topic: str, content: str, refs: Optional[list[str]] = 
                 f"qq rewrite: refusing — {len(fut)} '> updated:' line(s) are stamped in the "
                 f"FUTURE (fabricated timestamps win the newest-line sort and misreport HEAD "
                 f"state). Fix the stamp(s), or pass --allow-future for a deliberate timestamp "
-                f"repair/migration:\n  {shown}{more}", 2)
+                f"repair/migration:\n  {shown}{more}", 2)   # wording kept: pinned by a surface test
     # AUTHORING GATE: after the missing-HEAD refusal, before anything is read/locked. Empty
     # content falls through to the engine's own empty-content refusal (identical error path);
     # otherwise the WHOLE proposed file is queued verbatim — the ratifier replays it through
@@ -737,15 +995,18 @@ def _novel_line_buckets(content: str, old_lines: set) -> "list[tuple[Optional[st
     """Group a rewrite's NOVEL lines by the stamp of the update-line that owns them: a
     '> updated:' line opens a bucket keyed by its own timestamp (None if unstamped); any other
     '> ' meta line or a section header closes it (continuation lines in between ride their
-    marker's bucket). Crude and line-oriented — NOT fence-aware — matching the novel-line diff's
-    own err-toward-binding direction; a pasted example in the body can at worst bind under a
-    stray stamp, never lose a binding. Buckets come back in first-seen order, each as one text
-    blob for bind_write."""
+    marker's bucket). Marker recognition is the one reader's (update_marker_flags), so a fenced
+    or body-region pasted example no longer opens a bucket under its fake stamp — it binds under
+    the None bucket like any other prose, which errs toward binding, never away from it. The
+    bucket-closing rules themselves stay crude and line-oriented on purpose. Buckets come back
+    in first-seen order, each as one text blob for bind_write."""
     buckets: "dict[Optional[str], list[str]]" = {}
     order: "list[Optional[str]]" = []
     cur: "Optional[str]" = None
-    for ln in content.splitlines():
-        if ln.startswith("> updated:"):
+    lines = content.split("\n")
+    flags = update_marker_flags(lines)
+    for ln, is_marker in zip(lines, flags):
+        if is_marker:
             cur = UpdateItem(marker=ln).timestamp
         elif ln.startswith("> ") or ln.startswith("#"):
             cur = None
@@ -768,6 +1029,7 @@ def essence(store: Store, topic: str, text: str, refs: Optional[list[str]] = Non
     f = store.head_path(topic)
     if not f.is_file():
         raise WriteError(f"qq essence: no HEAD '{topic}' (qq new {topic} first)", 1)
+    text = _neutralize_caller_update_lines(canonical_newlines(text))
     # AUTHORING GATE: after the missing-HEAD refusal; the essence text (even an empty one —
     # legacy would happily write '> essence: ') is queued rather than landed.
     reason = authgate.gate_reason(store.config, topic)
@@ -777,6 +1039,9 @@ def essence(store: Store, topic: str, text: str, refs: Optional[list[str]] = Non
         if not f.is_file():   # re-check under the lock (review lock-3): concurrent delete
             raise WriteError(f"qq essence: no HEAD '{topic}' (deleted by a concurrent session "
                              f"while waiting for the lock)", 1)
+        # Same absorb rule as the engine (see _absorb_out_of_band): the merge below is computed
+        # from the live bytes, so without this a hand edit rode the essence commit.
+        _absorb_out_of_band(store, f"{topic}.md")
         old_text = f.read_text(encoding="utf-8", errors="replace")
         new_text = _essence_merge(old_text, text)
         f.write_text(new_text, encoding="utf-8")
@@ -811,6 +1076,11 @@ def finalize(store: Store, topic: str) -> str:
         if not f.is_file():   # re-check under the lock (review lock-3): concurrent delete
             raise WriteError(f"no HEAD for '{topic}' to finalize (deleted by a concurrent "
                              f"session while waiting for the lock)", 1)
+        # Absorb first (16479b2 review, finding 1): the snapshot below is a byte-copy of the
+        # live file, so a dirty HEAD used to put hand-edited content into the finalize commit
+        # and leave t.md dirty. ALL heads, not just this one (2026-08-10 ruling): the INDEX
+        # this verb commits derives from every HEAD — see _absorb_all_heads_out_of_band.
+        _absorb_all_heads_out_of_band(store)
         jdir = store.journal_subdir(topic)   # guarded (defense-in-depth; head_path above already
         jdir.mkdir(parents=True, exist_ok=True)   # rejects a traversal topic via the snapshot source)
         snap = _fresh_snapshot_path(jdir, ts)
@@ -888,6 +1158,12 @@ def delete(store: Store, topic: str) -> str:
         if not f.is_file():   # re-check under the lock (review lock-3): concurrent delete won
             raise WriteError(f"qq delete: no HEAD '{topic}' (already deleted by a concurrent "
                              f"session)", 1)
+        # Absorb first (16479b2 review, finding 1, the worse half): without this, a dirty
+        # HEAD's hand edit reached history only inside the journal snapshot under the deleting
+        # session's commit — the HEAD's own `git log -p` could never answer who wrote it.
+        # ALL heads, not just this one (2026-08-10 ruling): the INDEX this verb commits
+        # derives from every HEAD — see _absorb_all_heads_out_of_band.
+        _absorb_all_heads_out_of_band(store)
         jdir = store.journal_subdir(topic)
         jdir.mkdir(parents=True, exist_ok=True)
         snap = _fresh_snapshot_path(jdir, ts)
@@ -927,7 +1203,9 @@ def _compact_transform(text: str, keep_n: int) -> str:
     its continuations with it (the stranded-continuation bug the awk's comment records fixing).
     Essence + body (## sections) are always kept; the first `# ` line is the title and keeps
     any pre-update preamble flowing (keep=1); anything BEFORE the title matches no rule and is
-    dropped — exactly awk's fall-through `{next}`."""
+    dropped — exactly awk's fall-through `{next}`. Update-line recognition comes from the one
+    reader (update_marker_flags) since 2026-08-09: a fenced quoted example is a continuation of
+    its block, kept or dropped with it, never a block boundary of its own."""
     out: list[str] = []
     seen_title = False
     body = False
@@ -936,14 +1214,15 @@ def _compact_transform(text: str, keep_n: int) -> str:
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()   # awk sees records, not a trailing empty field
-    for ln in lines:
+    flags = update_marker_flags(lines)
+    for ln, is_marker in zip(lines, flags):
         if not seen_title and ln.startswith("# "):
             out.append(ln); seen_title = True; keep = True; continue
-        if ln.startswith("> essence:"):
+        if is_essence_marker(ln):
             body = True; out.append(ln); continue
         if body:
             out.append(ln); continue
-        if ln.startswith("> updated:"):
+        if is_marker:
             u += 1
             keep = u <= keep_n
             if keep:
@@ -1010,6 +1289,11 @@ def index_autofix_finding(store: Store, wait: Optional[float] = None) -> Optiona
         return None
     try:
         with qq_lock(store, wait=wait):
+            # 2026-08-10 ruling: the INDEX committed here derives from every HEAD, so every
+            # dirty HEAD is absorbed first (see _absorb_all_heads_out_of_band). Absorption
+            # commits files without changing their bytes, so `fresh` (computed above from
+            # those same bytes) is still the right content to write.
+            _absorb_all_heads_out_of_band(store)
             store.index_path.write_text(fresh, encoding="utf-8")
             commit_push(store, "qq check: reindex stale INDEX", ["INDEX.md"])
         return Finding(cls="T1 fix", fields={})

@@ -46,6 +46,17 @@ fi
 : "${GIT_COMMITTER_EMAIL:=qq-tests@localhost}"
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
+# Neutralize the agent-session identity (quintessence/agentid.py) for the whole gate. `qq update`
+# derives a `[<model>, session <id8>]` marker into every update-line it writes when the harness
+# names a session in the environment -- so this suite, which is routinely run BY an agent session,
+# would otherwise produce different bytes depending on who invoked it, and the exact-text pins in
+# test-write-surface.sh would pass for Thomas and fail for a session (or the reverse).
+#
+# Unconditional, and deliberately NOT the "a caller's own value wins" idiom the locale/git-identity
+# /QQ_CACHE blocks above use: for those, the caller's value is a legitimate preference. Here the
+# ambient value is the contaminant. A suite that wants a marker exports one for its own case.
+unset CLAUDE_CODE_SESSION_ID
+
 # Keep the embedding cache out of the invoking user's home (eighth review pass, F3). QQ_CACHE
 # defaults to ~/.cache/qq-search/embeddings.json, so any suite that builds an index left .lock and
 # .orphan-ages.json files there -- contradicting this file's own header, in a directory the suite

@@ -193,14 +193,89 @@ class TestHeadMeta(unittest.TestCase):
 
 
 class TestCountUpdateMarkers(unittest.TestCase):
-    def test_counts_raw_lines_not_fence_aware(self):
+    def test_fenced_example_not_counted(self):
+        """CHANGED 2026-08-09 (reader unification): this test previously pinned the opposite —
+        3, matching `grep -c '^> updated:'` for byte-parity with the legacy bash engine. That
+        engine is gone from this machine and the cross-engine parity suite no longer exists, so
+        the count now comes from the one reader: a pasted example inside a fence is not an
+        update-line, and cannot inflate the size nudge or `findings next`."""
         text = ("# T\n> updated: a\n> updated: b\n"
-                "```\n> updated: inside a fence, still counted (not fence-aware, matches grep -c)\n```\n"
+                "```\n> updated: inside a fence, an example, NOT counted\n```\n"
                 "> essence: e\n\n## S\n")
-        self.assertEqual(heads.count_update_markers(text), 3)
+        self.assertEqual(heads.count_update_markers(text), 2)
+
+    def test_body_example_not_counted(self):
+        text = ("# T\n> updated: a\n> essence: e\n\n## S\n"
+                "> updated: 2026-01-01T00:00:00Z pasted example in the body\n")
+        self.assertEqual(heads.count_update_markers(text), 1)
+
+    def test_titleless_head_is_counted(self):
+        """A HEAD whose H1 was lost (a whole-file rewrite that dropped it — seen live,
+        2026-08-09) still has real update-lines: the header region begins at the first
+        marker when no title exists."""
+        text = ("> updated: 2026-08-09T19:00:00Z first\n"
+                "> updated: 2026-08-09T18:00:00Z second\n\n## S\nbody\n")
+        self.assertEqual(heads.count_update_markers(text), 2)
+        self.assertEqual(len(heads.update_lines(text)), 2)
+        self.assertEqual(heads.head_meta(text)[0], "2026-08-09T19:00:00Z first")
+
+    def test_indented_line_not_counted(self):
+        """Column-0 anchor: the one-space indent is the write path's neutralization for a
+        quoted update-line, so an indented marker must be prose to EVERY reader."""
+        text = "# T\n> updated: a\n > updated: quoted, indented one space\n> essence: e\n\n## S\n"
+        self.assertEqual(heads.count_update_markers(text), 1)
 
     def test_zero_when_absent(self):
         self.assertEqual(heads.count_update_markers("# T\n> essence: e\n\n## S\n"), 0)
+
+
+class TestOneReaderAlignment(unittest.TestCase):
+    def test_flags_align_with_parse_updates(self):
+        """update_marker_flags and parse().updates are the same classification, positionally."""
+        text = ("preamble\n# T\n> updated: 2026-01-01T00:00:00Z a\ncont\n"
+                "```\n> updated: fenced example\n```\n"
+                "> updated: 2026-01-02 b\n> essence: e\n\n## S\n> updated: body example\n")
+        lines = text.split("\n")[:-1]
+        flags = heads.update_marker_flags(lines)
+        h = heads.parse(text)
+        self.assertEqual(sum(flags), len(h.updates))
+        self.assertEqual([lines[i] for i, f in enumerate(flags) if f],
+                         [u.marker for u in h.updates])
+
+    def test_headerless_body_start(self):
+        """A non-fenced '## ' before any title starts the body from the seek phase too — one
+        rule for the boundary, not one per phase."""
+        text = "## S\n> updated: 2026-01-01T00:00:00Z body example\n"
+        self.assertEqual(heads.count_update_markers(text), 0)
+        self.assertEqual(heads.parse(text).serialize(), text)
+
+
+class TestStampHelpers(unittest.TestCase):
+    def test_stamp_of_forms(self):
+        self.assertEqual(heads.stamp_of("2026-08-09T19:00:00Z text"), "2026-08-09T19:00:00Z")
+        self.assertEqual(heads.stamp_of("2026-08-09T19:00:00 text"), "2026-08-09T19:00:00")
+        self.assertEqual(heads.stamp_of("2026-08-09 text"), "2026-08-09")
+        self.assertIsNone(heads.stamp_of("no stamp here 2026-08-09"))
+
+    def test_stamp_datetime(self):
+        self.assertEqual(heads.stamp_datetime("2026-08-09T19:00:00Z").hour, 19)
+        self.assertEqual(heads.stamp_datetime("2026-08-09").hour, 0)
+        self.assertIsNone(heads.stamp_datetime("2026-13-99"))
+
+    def test_split_stamped(self):
+        lead, text = heads.split_stamped("> updated: 2026-08-09T19:00:00Z the text")
+        self.assertEqual(lead, "> updated: 2026-08-09T19:00:00Z ")
+        self.assertEqual(text, "the text")
+        # bare stamp with no separating whitespace after it: no insertion point
+        self.assertIsNone(heads.split_stamped("> updated: 2026-08-09T19:00:00Z"))
+        # trailing space and empty text: the whole line is the lead
+        lead, text = heads.split_stamped("> updated: 2026-08-09T19:00:00Z ")
+        self.assertEqual((lead, text), ("> updated: 2026-08-09T19:00:00Z ", ""))
+        self.assertIsNone(heads.split_stamped("> updated: unstamped text"))
+        self.assertIsNone(heads.split_stamped("not a marker at all"))
+
+    def test_canonical_newlines(self):
+        self.assertEqual(heads.canonical_newlines("a\r\nb\rc\nd"), "a\nb\nc\nd")
 
 
 class TestLegacyBrief(unittest.TestCase):

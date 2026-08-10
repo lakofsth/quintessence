@@ -47,7 +47,7 @@ from __future__ import annotations
 import json
 import os
 
-from .heads import UpdateItem
+from .heads import UpdateItem, is_update_marker
 from .refs import _fp_file
 
 ANNOTATION_PREFIX = "⚠ referent changed since written: "
@@ -127,9 +127,13 @@ class RefsView:
             if not self.has_refs(head):
                 return list(lines)
             out = []
+            # is_update_marker (the fragment-context predicate), not the document reader: the
+            # lines here may be a rendered SUBSET (qq brief passes only the lines it prints),
+            # so fence/region state is not reconstructable. A false positive joins on a stamp
+            # no ref record carries and annotates nothing — fail-soft by construction.
             for ln in lines:
                 out.append(ln)
-                if isinstance(ln, str) and ln.startswith("> updated:"):
+                if isinstance(ln, str) and is_update_marker(ln):
                     ts = UpdateItem(marker=ln).timestamp
                     if ts:
                         out.extend(self.line_annotations(head, ts))
@@ -161,8 +165,10 @@ class RefsView:
             if not self.has_refs(head) or not text:
                 return []
             out: list = []
+            # Same fragment-context predicate as annotate_lines: a search CHUNK starts at an
+            # arbitrary offset, so document state is unknowable here by construction.
             for ln in text.split("\n"):
-                if ln.startswith("> updated:"):
+                if is_update_marker(ln):
                     ts = UpdateItem(marker=ln).timestamp
                     if ts:
                         for ann in self.line_annotations(head, ts):

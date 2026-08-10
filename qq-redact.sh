@@ -56,8 +56,42 @@ qq_model_mode() {        # $1 = transcript path; echoes fable|opus|unknown from 
   local gated="${QQ_WRITE_TRUSTED_MODEL:-}"
   local safe="${QQ_SAFE_MODEL_PREFIX:-claude-opus-}"
   [ -n "$tp" ] && [ -r "$tp" ] || { echo unknown; return 0; }
-  m="$(tac "$tp" 2>/dev/null | grep -m1 -oE '"model"[[:space:]]*:[[:space:]]*"[^"]+"' 2>/dev/null \
-        | sed -E 's/.*"([^"]+)"$/\1/')"
+  # The NEWEST `type:"assistant"` entry's message.model, and STOP there — never walk back to an
+  # older entry. Kept byte-parallel with quintessence/authgate.model_identity, which learned this
+  # the hard way: rejecting a malformed newest entry by "keep looking" is a fail-OPEN, because
+  # every step backwards can only surface a different model and the only direction that matters is
+  # that it must never be a more trusted one than the session is actually running.
+  #
+  # Parsed, not scanned for the text `"model": "..."`. That scan is right on every transcript today
+  # (measured over 1112: unescaped matches occur on assistant entries and nowhere else) but rests
+  # on no STRUCTURED tool result carrying a `model` key, and those are stored unescaped on `user`
+  # entries. This is a TRUST decision, so it must not rest on what tools happen to return.
+  # No parser -> empty -> unknown -> untrusted, the fail-safe direction.
+  m=""
+  if command -v jq >/dev/null 2>&1; then
+    _last="$(jq -cR 'fromjson? | select(.type == "assistant")' <"$tp" 2>/dev/null | tail -1)"
+    [ -n "$_last" ] && m="$(printf '%s' "$_last" \
+      | jq -r 'if (.message | type) == "object" and (.message.model | type) == "string"
+               then .message.model else "" end' 2>/dev/null)"
+  elif command -v python3 >/dev/null 2>&1; then
+    m="$(python3 -c '
+import json, sys
+out = ""
+for line in sys.stdin:
+    try:
+        o = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(o, dict) and o.get("type") == "assistant":
+        msg = o.get("message")
+        v = msg.get("model") if isinstance(msg, dict) else None
+        out = v if isinstance(v, str) else ""          # newest wins, and it is FINAL
+print(out)
+' <"$tp" 2>/dev/null)"
+  fi
+  # A control or format character never classifies: it splits the line for one reader and not
+  # another, and both bash branches used to disagree with python about it.
+  case "$m" in *[[:cntrl:]]*) m="" ;; esac
   # empty model (fresh transcript) and empty gated id must BOTH resolve unknown — a bare
   # `case "" in "")` would otherwise spuriously report "fable" on a gate-off install
   [ -n "$m" ] || { echo unknown; return 0; }

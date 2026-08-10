@@ -10,8 +10,8 @@
 #           status missing-at-write, and the write itself succeeds unchanged (exit 0, line in
 #           the HEAD, committed).
 #   --ref: the explicit flag binds a referent the prose never names, on every write verb shape.
-# NEVER touches the live store — mktemp fixtures, own QQ_CONFIG/QQ_STATE_DIR, same isolation
-# convention as test-write-parity.sh.
+# NEVER touches the live store — mktemp fixtures, own QQ_CONFIG/QQ_STATE_DIR, the suite-wide
+# isolation convention.
 set -u
 ENGINE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 QQ="$ENGINE/qq"

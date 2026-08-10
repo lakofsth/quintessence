@@ -39,9 +39,12 @@ mkfixture(){   # mkfixture <dir>  — init an isolated store, set the env for it
 }
 
 # fixture transcripts: the gate reads the LAST message.model line
-OPUS_TP="$TMP/opus.jsonl";   printf '{"message":{"model":"claude-opus-4-6"}}\n'  > "$OPUS_TP"
-SONNET_TP="$TMP/sonnet.jsonl"; printf '{"message":{"model":"claude-sonnet-4-5"}}\n' > "$SONNET_TP"
-FABLE_TP="$TMP/fable.jsonl"; printf '{"message":{"model":"acme-gated-5"}}\n'  > "$FABLE_TP"
+# Transcript fixtures carry `"type":"assistant"` because a REAL entry does: model
+# detection parses entries now rather than scanning the line for `"model":"..."`,
+# so a fixture without the type field is a transcript Claude Code never writes.
+OPUS_TP="$TMP/opus.jsonl";   printf '{"type":"assistant","message":{"model":"claude-opus-4-6"}}\n'  > "$OPUS_TP"
+SONNET_TP="$TMP/sonnet.jsonl"; printf '{"type":"assistant","message":{"model":"claude-sonnet-4-5"}}\n' > "$SONNET_TP"
+FABLE_TP="$TMP/fable.jsonl"; printf '{"type":"assistant","message":{"model":"acme-gated-5"}}\n'  > "$FABLE_TP"
 
 GATE_ENV=(QQ_AUTHOR_GATE_SLUGS='sec-*' QQ_WRITE_TRUSTED_MODEL='acme-gated-5')
 

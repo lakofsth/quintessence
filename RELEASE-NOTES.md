@@ -6,6 +6,41 @@
 Changes that ask something of you, newest first. Everything else is in the commit log; this file
 is for the things you would want to know before or just after pulling.
 
+## Unreleased — update-lines say which agent wrote them
+
+### What changed
+
+`qq update` and `qq new` now put the writing session's identity into the update-line they compose,
+between the timestamp and your text:
+
+    > updated: 2026-08-09T06:42:13Z [claude-opus-5, session abcd1234] what changed and why
+
+The model is read from that session's own transcript and the id from the harness environment.
+Nothing is typed, which is the point: a marker an agent writes by hand is a claim, and the field a
+model is least reliable about is its own identifier.
+
+**Off-harness nothing is inserted.** With no agent session in the environment — a human at a
+terminal, cron, a script — the line is byte-for-byte what it always was. There is no setting to
+turn this on or off; the presence of an agent is the switch.
+
+### What it asks of you
+
+- **Stop typing `[Opus 5, ...]` markers into update-lines** if that was your convention; you will
+  get two. Existing lines are untouched — nothing rewrites history.
+- If you assert on update-line text in your own tooling, note that the marker sits *after* the
+  timestamp. The stamp still leads the line, so anything keyed on it (the refs view's join, the
+  digest's age ranking) is unaffected.
+- If your test suite runs under an agent session and pins update-line bytes, neutralize
+  `CLAUDE_CODE_SESSION_ID` for the run, or the same suite gives different answers depending on who
+  invoked it. This package's own harness does exactly that (`tests/run.sh`).
+
+A commit can carry the same identity as a git trailer, which lets a line's attribution be
+cross-checked with `git log --format='%(trailers:key=Agent,valueonly=true)'` — but that needs a
+`prepare-commit-msg` hook, and **no such hook ships with this package**. Without one, expect no
+trailer and read the line on its own. Note also that where a subagent makes the write, the two can
+legitimately disagree: the update-line names the subagent's model, a trailer written by the
+estate's own hook names the parent's.
+
 ## Unreleased — the crash-litter sweep no longer touches a bare `<target>.tmp`
 
 **If you cloned on or around 2026-08-02, read the last section — you may have one file to look

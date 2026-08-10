@@ -13,6 +13,9 @@ two runners each carry the guard in the place their own runner reads: this file 
 and `tests/test-py.sh` for the `unittest discover` path.
 
 Same rule as run.sh: fill in only what is missing, so a caller's own `QQ_CACHE` still wins.
+
+The agent-session identity below is the one thing here that does NOT follow that rule -- see its
+own note.
 """
 import os
 import shutil
@@ -23,6 +26,13 @@ _scratch = None
 if not os.environ.get("QQ_CACHE"):
     _scratch = tempfile.mkdtemp(prefix="qq-pytest-cache-")
     os.environ["QQ_CACHE"] = os.path.join(_scratch, "embeddings.json")
+
+# `qq update` derives a `[<model>, session <id8>]` marker into the update-lines it writes when the
+# harness names a session in the environment (quintessence/agentid.py). This suite is routinely
+# run BY an agent session, so leaving it set makes the bytes under test depend on who ran them.
+# Unconditional, unlike QQ_CACHE above: a caller's QQ_CACHE is a preference, a caller's ambient
+# session id is contamination. A test that wants a marker patches the variable for its own case.
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
 
 
 def pytest_sessionfinish(session, exitstatus):   # noqa: ARG001 - pytest's signature

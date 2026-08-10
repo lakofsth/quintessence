@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 
+from . import heads
 from .atomicio import atomic_write_json, best_effort_write
 from .config import Config
 
@@ -126,10 +127,13 @@ class Reconcile:
                 continue
             try:
                 with open(f, encoding="utf-8", errors="replace") as fh:
-                    for line in fh:
-                        if line.startswith("> essence:"):
-                            yield (f"HEAD {b} (essence)", line.split(":", 1)[1], "essence", f)
-                            break
+                    # The one reader (2026-08-10, closing the last stray spelling in the
+                    # tree): the raw first-match here could pick a fenced/example essence
+                    # line over the real one. Downstream is substring matching, so the
+                    # reader's stripped text is a safe shape change.
+                    ess = heads.parse(fh.read()).essence
+                if ess is not None:
+                    yield (f"HEAD {b} (essence)", ess, "essence", f)
             except OSError:
                 continue
         for f in sorted(glob.glob(os.path.join(self.memdir, "*.md"))):

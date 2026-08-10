@@ -30,7 +30,8 @@ QQ_LOCK_WAIT="${QQ_LOCK_WAIT:-30}"   # seconds to block for the lock before givi
 # Compaction thresholds — single source of truth, shared by qq-write's SOFT nudge (on every
 # write) and qq check's HARD flag (the consistency sweep). The BYTES gates size the UPDATE-LINE
 # REGION only (what `qq compact` can actually fold) — NOT the whole file, because a large curated
-# body is not bloat and compaction can't shrink it (see ul_region_bytes + QQ_BODY_HARD_BYTES).
+# body is not bloat and compaction can't shrink it (the engine measures the update-line region
+# via quintessence.heads update_line_region_bytes; see QQ_BODY_HARD_BYTES).
 # Two tiers on purpose: nudge early (advisory), flag later (it's actually a problem now).
 QQ_COMPACT_SOFT_BYTES="${QQ_COMPACT_SOFT_BYTES:-32768}"; QQ_COMPACT_SOFT_LINES="${QQ_COMPACT_SOFT_LINES:-12}"
 QQ_COMPACT_HARD_BYTES="${QQ_COMPACT_HARD_BYTES:-49152}"; QQ_COMPACT_HARD_LINES="${QQ_COMPACT_HARD_LINES:-15}"
@@ -39,18 +40,17 @@ QQ_COMPACT_HARD_BYTES="${QQ_COMPACT_HARD_BYTES:-49152}"; QQ_COMPACT_HARD_LINES="
 # remedy (condense the sections / `qq brief`). Used by qq check only.
 QQ_BODY_HARD_BYTES="${QQ_BODY_HARD_BYTES:-49152}"
 
-# ul_region_bytes <file> — bytes of the update-line region: the `> updated:` block INCLUDING its
-# multi-line continuation paragraphs, up to (not incl.) `> essence:`. Exactly what `qq compact`
-# folds, so the compaction nudges size THIS, not the whole file.
-ul_region_bytes() {
-  awk '/^> essence:/{f=0} /^> updated:/{f=1} f{b+=length($0)+1} END{print b+0}' "${1:?ul_region_bytes: file}"
-}
+# (ul_region_bytes lived here until 2026-08-09: an awk re-implementation of "which lines are
+# the update-line region". The engine's own measurement is quintessence.heads
+# `update_line_region_bytes`, nothing else called the awk, and a second implementation of the
+# reader's grammar is exactly what the reader-unification ruling removes — so it was deleted
+# rather than kept as a drift surface.)
 
 # Operational-contract version. CONTRACT.md (the small text injected into a session to teach the
 # write-path) carries a matching "qq-contract vN" marker. Bump BOTH when the write-path verbs or
 # rules change; `qq doctor` compares them so a drifted/stale injected contract gets flagged
 # (confidently-wrong instructions are worse than none).
-QQ_CONTRACT_VERSION=2
+QQ_CONTRACT_VERSION=3
 
 # Runtime state (activity log, findings queue, prederive cache) — kept OUT of the engine/repo
 # dir (and out of an ephemeral plugin dir) so it survives updates and never pollutes a tracked

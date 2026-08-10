@@ -1,4 +1,4 @@
-<!-- qq-contract v2 – keep this SHORT; it is injected into context every session. -->
+<!-- qq-contract v3 – keep this SHORT; it is injected into context every session. -->
 # Quintessence – operational contract (always-on)
 
 *Everything not saved will be lost.* A future instance of you starts blank, and this store is
@@ -18,10 +18,10 @@ the only channel to it. Record what a future you would need, and read it back to
 - **Snapshot** to the journal: `qq finalize <topic>` (aliases: `qq checkpoint`, `qq save`).
 - Never edit files in the store directly, and never run git there. A raw `git commit` or
   `push` in the store is blocked: the `qq init` git hooks reject any commit that lacks the
-  write-lock marker. A raw file edit is not blocked at write time, but it is not a write either – 
-  it gets folded silently into the next `qq` commit with no attribution. So a direct edit is
-  unsupported rather than impossible: drive every write through `qq`, which holds the lock and
-  records authorship.
+  write-lock marker. A raw file edit is not blocked at write time, but it is not a write either –
+  the next `qq` write to that file commits it separately as an unattributed "absorb out-of-band
+  edit" before its own change, so hand-edited content survives but is visibly NOT qq's. Drive
+  every write through `qq`, which holds the lock and records authorship.
 
 **What goes where:**
 - A **reasoning thread / decision-state / open loop** → a quintessence **HEAD** (`qq update`).

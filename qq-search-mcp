@@ -184,8 +184,9 @@ def update_head(topic: str, text: str) -> str:
     thread so a future session can resume it.
 
     IMPORTANT — pass PROSE ONLY. Do NOT write a "> updated: <timestamp>" marker line yourself:
-    the store stamps the authorship + timestamp automatically, and a hand-authored marker is
-    preserved verbatim (that is exactly how a past session recorded a fabricated future time).
+    the store stamps the authorship + timestamp automatically. A line in your text that would
+    parse as an update-line is moved one column right, so it lands as visible prose rather than
+    as a second update-line — quoting one is fine, minting one is not yours to do.
     Just give the substance of the update.
 
     Atomic durable FACTS (about the user, environment) do NOT go here — the memory store is

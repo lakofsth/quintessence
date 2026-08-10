@@ -26,12 +26,15 @@ no(){ fail=$((fail+1)); printf 'FAIL %s\n' "$1"; }
 GATED=acme-gated-5
 
 # fixture transcripts (the LAST message.model line is the signal)
-OPUS_TP="$TMP/opus.jsonl";     printf '{"message":{"model":"claude-opus-4-6"}}\n' > "$OPUS_TP"
-FABLE_TP="$TMP/fable.jsonl";   printf '{"message":{"model":"%s"}}\n' "$GATED" > "$FABLE_TP"
-SONNET_TP="$TMP/sonnet.jsonl"; printf '{"message":{"model":"claude-sonnet-4-5"}}\n' > "$SONNET_TP"
+# Transcript fixtures carry `"type":"assistant"` because a REAL entry does: model
+# detection parses entries now rather than scanning the line for `"model":"..."`,
+# so a fixture without the type field is a transcript Claude Code never writes.
+OPUS_TP="$TMP/opus.jsonl";     printf '{"type":"assistant","message":{"model":"claude-opus-4-6"}}\n' > "$OPUS_TP"
+FABLE_TP="$TMP/fable.jsonl";   printf '{"type":"assistant","message":{"model":"%s"}}\n' "$GATED" > "$FABLE_TP"
+SONNET_TP="$TMP/sonnet.jsonl"; printf '{"type":"assistant","message":{"model":"claude-sonnet-4-5"}}\n' > "$SONNET_TP"
 MULTI_TP="$TMP/multi.jsonl"    # older opus turn, newest fable turn: last-known wins
-{ printf '{"message":{"model":"claude-opus-4-6"}}\n'
-  printf '{"message":{"model":"%s"}}\n' "$GATED"
+{ printf '{"type":"assistant","message":{"model":"claude-opus-4-6"}}\n'
+  printf '{"type":"assistant","message":{"model":"%s"}}\n' "$GATED"
   printf '{"type":"user","no_model":true}\n'; } > "$MULTI_TP"
 EMPTY_TP="$TMP/empty.jsonl"; : > "$EMPTY_TP"
 

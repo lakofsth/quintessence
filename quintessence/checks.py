@@ -56,7 +56,7 @@ from typing import Optional
 from .atomicio import atomic_write_text
 from .config import Config
 from .findings import Finding, FindingsFile
-from .heads import count_update_markers, head_meta, parse as parse_head
+from .heads import count_update_markers, head_meta, parse as parse_head, update_lines
 from .slugs import SlugResolver, normalize
 from .store import Store, _locale_sort_key, state_lock
 
@@ -280,11 +280,10 @@ class Checks:
             if not essence:
                 continue
             flagged = False
-            for line in text.split("\n"):
+            for item in update_lines(text):   # the one reader: a quoted example can't flag
                 if flagged:
                     break
-                if not line.startswith("> updated:"):
-                    continue
+                line = item.marker
                 umark = line.upper()
                 if not any(kw in umark for kw in _ESSENCE_LAG_KEYWORDS):
                     continue
