@@ -36,6 +36,7 @@ from typing import Optional
 
 from .atomicio import atomic_write_lines, best_effort_write
 from .config import Config
+from .heads import update_lines, update_marker_flags
 from .findings import Finding
 from .search import SearchIndex
 
@@ -70,11 +71,8 @@ class Xref:
         iso = None
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
-                for ln in f:
-                    m = re.match(r"^> updated:\s*(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}Z?)?)", ln)
-                    if m:
-                        iso = m.group(1)
-                        break
+                items = update_lines(f.read())   # the one reader; stamp grammar unchanged
+            iso = items[0].timestamp if items else None
         except OSError:
             pass
         if iso:
@@ -177,9 +175,12 @@ class Xref:
         path = os.path.join(self.qdir, topic + ".md")
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
-                body = "".join(ln for ln in f if not ln.startswith("> updated:"))
+                text = f.read()
         except OSError:
             return None
+        lines = text.split("\n")
+        flags = update_marker_flags(lines)   # the one reader: only REAL markers are excluded
+        body = "\n".join(ln for ln, is_marker in zip(lines, flags) if not is_marker)
         return hashlib.sha1(body.encode("utf-8", "replace")).hexdigest()
 
     def load_content_store(self) -> dict:

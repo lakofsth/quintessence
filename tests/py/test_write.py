@@ -8,15 +8,17 @@ auto-fix. Each test drives a REAL git-initialized fixture store — never the li
 ~/quintessence — matching the phase's absolute rule (write-path testing only ever happens on
 throwaway fixtures).
 
-Cross-engine byte-parity against qq-legacy (same write sequence, two stores, diffed) and the
-legacy/python-interop story (alternating writers on ONE store) are covered separately by
-tests/test-write-parity.sh (a bash suite driving both real binaries) — this file pins the
-PYTHON ENGINE's own behavior in isolation, including branches parity testing alone wouldn't
-reach on every run (lock timeouts, marker-scoping, the raw shrink-guard path no `qq` verb
-exercises today since `rewrite` always passes --replace)."""
+Cross-engine byte-parity against qq-legacy was once covered by tests/test-write-parity.sh (a
+bash suite driving both real binaries); that suite left the tree with the bash engine itself,
+and no cross-engine parity coverage exists anymore — the python engine is the only writer.
+This file pins the PYTHON ENGINE's own behavior in isolation, including branches a parity diff
+alone wouldn't reach on every run (lock timeouts, marker-scoping, the raw shrink-guard path no
+`qq` verb exercises today since `rewrite` always passes --replace)."""
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,10 +29,19 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from quintessence import heads
 from quintessence import write as w
 from quintessence.config import Config
 from quintessence.findings import Finding
+from quintessence.heads import UpdateItem, count_update_markers, parse as parse_head
 from quintessence.store import LockTimeout, Store
+
+
+# Read at IMPORT, before any test's setUp or addCleanup can touch the process environment.
+# The first version of the guard below read os.environ at assertion time and so could never fail:
+# TestAgentMarkerOnUpdateLines.setUp registers an addCleanup that pops the variable, and that
+# class sorts first, so by the time the guard ran the variable was always gone.
+_AMBIENT_SESSION_AT_IMPORT = os.environ.get("CLAUDE_CODE_SESSION_ID")
 
 
 def make_store(base: str, **overrides) -> Store:
@@ -490,6 +501,169 @@ class ReviewRegressions20260729(unittest.TestCase):
         self.assertIn("STRAY-BODY-LINE", read(self.store, "t"))
         self.assertTrue(any("absorb out-of-band" in m for m in git_log(self.store)))
 
+    def test_update_absorbs_stray_edit_as_its_own_commit(self):
+        """2026-08-09, Thomas's ruling (provenance instead of a visible token): the absorb step
+        runs on the PREPEND path too. Until now it was REPLACE-only — data safety was the only
+        goal, and a prepend destroys nothing — so a hand edit followed by `qq update` rode the
+        update's commit, attributed to the updating session forever. Git is the store's
+        provenance layer, so the introducing commit must tell the truth: the stray edit gets
+        its own absorb commit, and the update commit's diff carries only what qq composed."""
+        w.new(self.store, "t", "e")
+        w.update(self.store, "t", "first line")
+        with open(self.store.head_path("t"), "a", encoding="utf-8") as fh:
+            fh.write("HAND-EDITED note\n")
+        w.update(self.store, "t", "second line")
+        msgs = git_log(self.store)
+        self.assertIn("qq: absorb out-of-band edit to t.md", msgs)
+        self.assertLess(msgs.index("qq-write(prepend): t.md"),
+                        msgs.index("qq: absorb out-of-band edit to t.md"))
+        newest = subprocess.run(["git", "-C", str(self.store.qdir), "log", "-p", "-1",
+                                 "--", "t.md"], capture_output=True, text=True).stdout
+        self.assertNotIn("HAND-EDITED", newest)     # the update commit is only qq's own write
+        self.assertIn("second line", newest)
+        self.assertIn("HAND-EDITED note", read(self.store, "t"))   # nothing destroyed
+
+    def test_essence_absorbs_stray_edit_as_its_own_commit(self):
+        """Same class, same ruling: `qq essence` commits inline (its own non-engine path), and
+        the merge is computed from the live bytes — so without an absorb step the hand edit
+        rode the essence commit."""
+        w.new(self.store, "t", "e")
+        with open(self.store.head_path("t"), "a", encoding="utf-8") as fh:
+            fh.write("HAND-EDITED essence-path note\n")
+        w.essence(self.store, "t", "a fresh essence")
+        msgs = git_log(self.store)
+        self.assertIn("qq: absorb out-of-band edit to t.md", msgs)
+        newest = subprocess.run(["git", "-C", str(self.store.qdir), "log", "-p", "-1",
+                                 "--", "t.md"], capture_output=True, text=True).stdout
+        self.assertNotIn("HAND-EDITED", newest)
+        self.assertIn("a fresh essence", newest)
+        self.assertIn("HAND-EDITED essence-path note", read(self.store, "t"))
+
+    def test_finalize_absorbs_stray_edit_before_snapshotting(self):
+        """16479b2 review, finding 1: finalize snapshotted the DIRTY bytes and committed them
+        inside its own commit (journal copy), leaving t.md dirty and the hand edit attributed
+        to the finalizing session. Absorb-first makes the snapshot a copy of a committed state
+        and the HEAD clean afterward."""
+        w.new(self.store, "t", "e")
+        with open(self.store.head_path("t"), "a", encoding="utf-8") as fh:
+            fh.write("HAND-EDITED pre-finalize\n")
+        w.finalize(self.store, "t")
+        self.assertIn("qq: absorb out-of-band edit to t.md", git_log(self.store))
+        head_hist = subprocess.run(["git", "-C", str(self.store.qdir), "log", "-p", "-1",
+                                    "--", "t.md"], capture_output=True, text=True).stdout
+        self.assertIn("absorb out-of-band", head_hist)   # newest t.md commit IS the absorb
+        self.assertIn("HAND-EDITED", head_hist)
+        porcelain = subprocess.run(["git", "-C", str(self.store.qdir), "status",
+                                    "--porcelain", "--", "t.md"],
+                                   capture_output=True, text=True).stdout
+        self.assertEqual(porcelain.strip(), "")          # HEAD clean after finalize
+
+    def test_delete_absorbs_stray_edit_so_head_history_keeps_it(self):
+        """16479b2 review, finding 1, the worse half: delete removed the dirty HEAD, so the
+        hand edit reached history ONLY inside the journal snapshot under the deleting
+        session's commit — `git log -p -- t.md` could never answer who wrote it. Absorb-first
+        puts it in the HEAD's own history before the removal."""
+        w.new(self.store, "t", "e")
+        with open(self.store.head_path("t"), "a", encoding="utf-8") as fh:
+            fh.write("HAND-EDITED pre-delete\n")
+        w.delete(self.store, "t")
+        self.assertIn("qq: absorb out-of-band edit to t.md", git_log(self.store))
+        head_hist = subprocess.run(["git", "-C", str(self.store.qdir), "log", "-p", "--",
+                                    "t.md"], capture_output=True, text=True).stdout
+        self.assertIn("HAND-EDITED pre-delete", head_hist)
+        self.assertFalse(self.store.head_path("t").is_file())   # still deleted
+
+    def test_finalize_sweeps_every_dirty_head_not_just_its_target(self):
+        """2026-08-10 ruling, closing the f1a0a14 review's residual: the INDEX a finalize
+        commits derives a line from EVERY head, so path-scoped absorption let the index commit
+        carry another topic's hand edit before that topic's own history recorded it. The sweep
+        absorbs every dirty head first."""
+        w.new(self.store, "t", "e")
+        w.new(self.store, "u", "u-essence")
+        with open(self.store.head_path("u"), "a", encoding="utf-8") as fh:
+            fh.write("HAND-EDITED other-topic note\n")
+        w.finalize(self.store, "t")
+        msgs = git_log(self.store)
+        self.assertIn("qq: absorb out-of-band edit to u.md", msgs)
+        self.assertLess(msgs.index("qq finalize: t"),
+                        msgs.index("qq: absorb out-of-band edit to u.md"))
+        porcelain = subprocess.run(["git", "-C", str(self.store.qdir), "status",
+                                    "--porcelain", "--", "u.md"],
+                                   capture_output=True, text=True).stdout
+        self.assertEqual(porcelain.strip(), "")
+
+    def test_delete_sweeps_every_dirty_head_not_just_its_target(self):
+        w.new(self.store, "t", "e")
+        w.new(self.store, "u", "u-essence")
+        with open(self.store.head_path("u"), "a", encoding="utf-8") as fh:
+            fh.write("HAND-EDITED survives t's deletion\n")
+        w.delete(self.store, "t")
+        self.assertIn("qq: absorb out-of-band edit to u.md", git_log(self.store))
+        self.assertIn("HAND-EDITED survives", read(self.store, "u"))
+
+    def test_index_autofix_sweeps_dirty_heads_before_committing_the_index(self):
+        w.new(self.store, "t", "e")
+        w.update(self.store, "t", "a line")        # update never reindexes -> INDEX now stale
+        with open(self.store.head_path("t"), "a", encoding="utf-8") as fh:
+            fh.write("HAND-EDITED before autofix\n")
+        finding = w.index_autofix_finding(self.store)
+        self.assertEqual(finding.cls, "T1 fix")
+        msgs = git_log(self.store)
+        self.assertIn("qq: absorb out-of-band edit to t.md", msgs)
+        self.assertLess(msgs.index("qq check: reindex stale INDEX"),
+                        msgs.index("qq: absorb out-of-band edit to t.md"))
+
+    def test_staged_deletion_does_not_wedge_the_sweep(self):
+        """0845bb0 review finding: an out-of-band `git rm` (staging is not hook-blocked, only
+        commits are) left a staged deletion the sweep could not pass — commit_push blanket
+        `git add`-ed a pathspec matching nothing and exited 128, and every sweep-carrying verb
+        failed identically until someone resolved the index by hand. A fully-staged change
+        needs no add; it needs committing."""
+        w.new(self.store, "t", "e")
+        w.new(self.store, "victim", "v")
+        subprocess.run(["git", "-C", str(self.store.qdir), "rm", "-q", "victim.md"],
+                       check=True, capture_output=True)
+        out = w.finalize(self.store, "t")          # must NOT raise
+        self.assertIn("journal", out)
+        self.assertIn("qq: absorb out-of-band edit to victim.md", git_log(self.store))
+        porcelain = subprocess.run(["git", "-C", str(self.store.qdir), "status",
+                                    "--porcelain"], capture_output=True, text=True).stdout
+        self.assertNotIn("victim.md", porcelain)   # deletion committed, store not wedged
+        self.assertFalse(self.store.head_path("victim").is_file())
+
+    def test_staged_rename_absorbs_whole_not_half(self):
+        """Same finding, the manufactured variant: after an out-of-band `git mv`, absorbing
+        only the new name committed the addition half and left the deletion half staged — the
+        NEXT sweep verb then wedged. Both halves of a rename land in one absorb commit."""
+        w.new(self.store, "t", "e")
+        w.new(self.store, "old-name", "o")
+        subprocess.run(["git", "-C", str(self.store.qdir), "mv", "old-name.md",
+                        "new-name.md"], check=True, capture_output=True)
+        w.finalize(self.store, "t")                # must NOT raise
+        porcelain = subprocess.run(["git", "-C", str(self.store.qdir), "status",
+                                    "--porcelain"], capture_output=True, text=True).stdout
+        self.assertNotIn("old-name", porcelain)    # deletion half not left behind
+        self.assertNotIn("new-name", porcelain)
+        w.finalize(self.store, "t")                # the second verb must not wedge either
+
+    def test_rename_out_of_scope_still_absorbs_the_in_scope_half(self):
+        """Post-fb5f3fd review finding: the sweep's scope test ran on the DESTINATION only, so
+        a hand `git mv` of a top-level HEAD into a subdirectory was dropped whole — the staged
+        rename sat unabsorbed forever (every future sweep discarded it identically), and a
+        later `qq new` under the old name silently continued the moved topic's history. The
+        in-scope half decides absorption; both halves ride one commit."""
+        w.new(self.store, "t", "e")
+        w.new(self.store, "leaver", "l")
+        (self.store.qdir / "archive").mkdir()
+        subprocess.run(["git", "-C", str(self.store.qdir), "mv", "leaver.md",
+                        "archive/leaver.md"], check=True, capture_output=True)
+        w.finalize(self.store, "t")                # must absorb, not skip
+        self.assertIn("qq: absorb out-of-band edit to leaver.md", git_log(self.store))
+        porcelain = subprocess.run(["git", "-C", str(self.store.qdir), "status",
+                                    "--porcelain"], capture_output=True, text=True).stdout
+        self.assertNotIn("leaver", porcelain)      # neither half staged, nothing left to wedge
+        w.finalize(self.store, "t")                # and the next sweep verb still runs clean
+
     def test_rewrite_absorbs_stray_edit_then_refuses(self):
         w.new(self.store, "t", "e")
         w.update(self.store, "t", "first line")
@@ -631,3 +805,407 @@ class JournalSnapshotIOFailure20260729(unittest.TestCase):
         self.assertEqual(list(jdir.iterdir()), [])          # no partial snapshot left behind
         self.assertTrue(self.store.head_path("gamma").is_file())   # never unlinked
         self.assertNotIn("qq delete: gamma", git_log(self.store))   # nothing committed
+
+
+# ---- the derived agent marker on update-lines (quintessence.agentid) ------------------------
+class TestAgentMarkerOnUpdateLines(unittest.TestCase):
+    """`qq update` and `qq new` stamp the writing session's identity into the update-line they
+    compose. Driven end-to-end through the real verbs with a fake HOME, so what is pinned is the
+    bytes that land in a HEAD — the module's own derivation is pinned in test_agentid.py.
+
+    Every test here sets CLAUDE_CODE_SESSION_ID explicitly. The harness unsets it for the whole
+    gate (tests/run.sh, tests/test-py.sh, tests/py/conftest.py) precisely so these bytes do not
+    depend on whether an agent or a human ran the suite."""
+
+    SID = "abcd1234-5678-90ab-cdef-1234567890ab"
+    MARKER = "[claude-opus-5, session abcd1234]"
+    LINE_RE = r"^> updated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z "
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = self.tmp.name
+        self.home = os.path.join(self.base, "home")
+        proj = os.path.join(self.home, ".claude", "projects", "-home-someone")
+        os.makedirs(proj)
+        entry = {"type": "assistant",
+                 "message": {"role": "assistant", "model": "claude-opus-5", "content": []}}
+        with open(os.path.join(proj, f"{self.SID}.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+        self.store = make_store(self.base)
+
+    def as_agent(self):
+        return mock.patch.dict(os.environ,
+                                {"HOME": self.home, "CLAUDE_CODE_SESSION_ID": self.SID})
+
+    def as_human(self):
+        env = mock.patch.dict(os.environ, {"HOME": self.home})
+        self.addCleanup(os.environ.pop, "CLAUDE_CODE_SESSION_ID", None)
+        return env
+
+    def newest_line(self, topic: str) -> str:
+        for ln in read(self.store, topic).split("\n"):
+            if ln.startswith("> updated:"):
+                return ln
+        raise AssertionError(f"no update-line in {topic}")
+
+    def test_update_line_carries_the_derived_marker(self):
+        with self.as_agent():
+            w.new(self.store, "alpha", "an essence")
+            w.update(self.store, "alpha", "the claim")
+        self.assertRegex(self.newest_line("alpha"),
+                          self.LINE_RE + re.escape(self.MARKER) + r" the claim$")
+
+    def test_new_scaffolds_its_created_line_with_the_marker(self):
+        with self.as_agent():
+            w.new(self.store, "alpha", "an essence")
+        self.assertRegex(self.newest_line("alpha"),
+                          self.LINE_RE + re.escape(self.MARKER) + r" \(created\)$")
+
+    def test_off_harness_the_line_is_exactly_what_it_always_was(self):
+        """Negative control. Not `assertNotIn(marker)` — that passes for a line mangled in some
+        other way. The whole line is pinned against the pre-marker shape."""
+        with self.as_human():
+            os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+            w.new(self.store, "beta", "an essence")
+            w.update(self.store, "beta", "the claim")
+            self.assertRegex(self.newest_line("beta"), self.LINE_RE + r"the claim$")
+            first = [ln for ln in read(self.store, "beta").split("\n")
+                     if ln.startswith("> updated:")][-1]
+            self.assertRegex(first, self.LINE_RE + r"\(created\)$")
+
+    def test_the_negative_control_could_have_failed(self):
+        """Rule 3: same store, same verbs, same assertions — only the environment differs."""
+        with self.as_agent():
+            w.new(self.store, "gamma", "an essence")
+            w.update(self.store, "gamma", "the claim")
+        self.assertNotRegex(self.newest_line("gamma"), self.LINE_RE + r"the claim$")
+
+    def test_the_marker_does_not_disturb_the_line_stamp(self):
+        """The seam. `UpdateItem.timestamp` is the join key the refs view (B2) matches an
+        update-line on, and the digest ranks HEADs by the same stamp — both read it off the front
+        of a line the marker is now inserted into."""
+        with self.as_agent():
+            w.new(self.store, "delta", "an essence")
+            w.update(self.store, "delta", "the claim")
+        line = self.newest_line("delta")
+        ts = UpdateItem(marker=line).timestamp
+        self.assertRegex(ts, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertIn(ts, line.split(self.MARKER)[0])
+        newest = parse_head(read(self.store, "delta")).updates[0]
+        self.assertEqual(newest.timestamp, ts)            # stamp still leads the line
+        self.assertTrue(newest.text.startswith(self.MARKER))   # marker sits after it, in the text
+
+    def test_reapplying_the_marker_does_not_double_stamp(self):
+        """A second pass over an already-marked line is a no-op, so no re-entry into the write
+        path (an engine that normalizes twice, a caller replaying its own content) can stack
+        markers."""
+        with self.as_agent():
+            once = w._insert_agent_marker("> updated: 2026-01-01T00:00:00Z the claim")
+            twice = w._insert_agent_marker(once)
+        self.assertEqual(once, f"> updated: 2026-01-01T00:00:00Z {self.MARKER} the claim")
+        self.assertEqual(twice, once)
+
+    def test_a_first_line_that_is_not_a_stamped_update_line_is_untouched(self):
+        with self.as_agent():
+            for content in ("no stamp here", "> essence: not an update line", ""):
+                with self.subTest(content=content):
+                    self.assertEqual(w._insert_agent_marker(content), content)
+
+    def test_continuation_lines_ride_along_untouched(self):
+        with self.as_agent():
+            out = w._insert_agent_marker("> updated: 2026-01-01T00:00:00Z the claim\ndetail\nmore")
+        self.assertEqual(out.split("\n")[1:], ["detail", "more"])
+
+
+    def test_a_marker_from_another_session_is_replaced_not_stacked(self):
+        """The authoring gate's documented ratification is a DIFFERENT session replaying a queued
+        proposal through the same verb, so the common re-stamp is cross-session. Comparing against
+        this session's own marker (the first version) let exactly that case through."""
+        with self.as_agent():
+            out = w._insert_agent_marker(
+                "> updated: 2026-01-01T00:00:00Z [claude-sonnet-5, session 1111aaaa] drafted")
+        self.assertEqual(out, f"> updated: 2026-01-01T00:00:00Z {self.MARKER} drafted")
+
+    def test_a_marker_whose_session_id_is_not_hex_is_still_stripped(self):
+        """The strip regex must admit every character `agentid._SID_RE` does. Spelling its session
+        half as `[0-9A-Za-z]{1,64}` looked right against uuid fixtures and silently failed for any
+        id with a `-` or `_` in its first eight characters — the double-stamp again. Nothing in the
+        suite noticed, because every fixture id happened to start with eight hex digits."""
+        with self.as_agent():
+            out = w._insert_agent_marker(
+                "> updated: 2026-01-01T00:00:00Z [claude-opus-5, session my-sess-] drafted")
+            out2 = w._insert_agent_marker(
+                "> updated: 2026-01-01T00:00:00Z [claude-opus-5, session abcd_123] drafted")
+        self.assertEqual(out, f"> updated: 2026-01-01T00:00:00Z {self.MARKER} drafted")
+        self.assertEqual(out2, f"> updated: 2026-01-01T00:00:00Z {self.MARKER} drafted")
+
+    def test_the_session_field_is_bounded_to_what_marker_can_emit(self):
+        """`marker()` emits `sid[:8]`, so anything longer is not a marker and must survive as
+        prose. The bound is the only thing limiting what the stripper eats; without it the field
+        ran to 64 characters of ordinary words."""
+        with self.as_agent():
+            out = w._insert_agent_marker(
+                "> updated: 2026-01-01T00:00:00Z [notes, session retrospective] the real text")
+        self.assertIn("[notes, session retrospective] the real text", out)
+
+    def test_a_line_already_doubled_by_the_old_bug_comes_back_clean(self):
+        """`count=1` half-repaired it, leaving one stale marker behind."""
+        with self.as_agent():
+            out = w._insert_agent_marker(
+                "> updated: 2026-01-01T00:00:00Z [claude-sonnet-5, session 1111aaaa] "
+                "[claude-haiku-4-5, session 2222bbbb] drafted")
+        self.assertEqual(out, f"> updated: 2026-01-01T00:00:00Z {self.MARKER} drafted")
+
+    def test_a_wiki_link_opening_the_text_is_not_eaten(self):
+        """The marker regex is matched by shape, narrowly, so ordinary prose that merely starts
+        with a bracket survives."""
+        with self.as_agent():
+            out = w._insert_agent_marker("> updated: 2026-01-01T00:00:00Z [[some-head]] see this")
+        self.assertEqual(out, f"> updated: 2026-01-01T00:00:00Z {self.MARKER} [[some-head]] see this")
+
+
+class TestHarnessNeutralizesTheAmbientSession(unittest.TestCase):
+    def test_the_suite_runs_with_no_ambient_session_id(self):
+        """Pins the three `unset CLAUDE_CODE_SESSION_ID` lines (tests/run.sh, tests/test-py.sh,
+        tests/py/conftest.py) that the review found unpinned. Without them this suite's
+        update-line assertions quietly depend on whether an agent or a human invoked it — and it
+        is agents who run it. Delete any of the three and this goes red for them, green for a
+        human, which is the asymmetry itself."""
+        self.assertIsNone(_AMBIENT_SESSION_AT_IMPORT,
+                          "the runner must neutralize CLAUDE_CODE_SESSION_ID before python starts")
+
+
+class TestCallerCannotFabricateAStamp(unittest.TestCase):
+    """`_strip_caller_stamp` removed ONE `> updated: `, and a '>'-leading line is then returned
+    verbatim by the normalizer — so a doubled prefix smuggled the caller's own stamp through. A
+    2030 stamp wins the newest-line sort, owns the menu's UPDATED column and the digest's age
+    ranking, and since the marker landed the line also read as machine-attested."""
+
+    def test_a_doubled_updated_prefix_does_not_smuggle_a_future_stamp(self):
+        with tempfile.TemporaryDirectory() as base:
+            store = make_store(base)
+            w.new(store, "alpha", "seed")
+            w.update(store, "alpha",
+                     "> updated: > updated: 2030-01-01T00:00:00Z FABRICATED future claim")
+            line = [ln for ln in read(store, "alpha").split("\n")
+                    if ln.startswith("> updated:")][0]
+            self.assertNotIn("2030-01-01", line)
+            self.assertIn("FABRICATED future claim", line)
+
+    def test_the_single_prefix_form_was_already_stripped(self):
+        """Positive control: the one-deep case the existing surface test covers still behaves,
+        so the fixpoint loop did not change what already worked."""
+        with tempfile.TemporaryDirectory() as base:
+            store = make_store(base)
+            w.new(store, "alpha", "seed")
+            w.update(store, "alpha", "> updated: 2030-01-01T00:00:00Z single prefix")
+            line = [ln for ln in read(store, "alpha").split("\n")
+                    if ln.startswith("> updated:")][0]
+            self.assertNotIn("2030-01-01", line)
+
+
+class TestCallerContentCannotBecomeAnUpdateLine(unittest.TestCase):
+    """Four review rounds each found another spelling of a caller-injected update-line, because
+    each fix RECOGNISED forged stamps and a recogniser must match every reader's grammar — and at
+    the time the readers DISAGREED (three stamp grammars across heads/cli). The 2026-08-09
+    unification left one reader, and the neutralizer still does not look at stamps: a caller line
+    the reader would treat as structure is moved one column right, where the reader treats it as
+    prose. Grammar-independent, so a new stamp format cannot reopen it."""
+
+    SPELLINGS = ("2032-01-01", "2032-01-01T00:00Z", "2032-01-01T00:00:00",
+                 "2032-01-01T00:00:00.000Z", "2032-01-01T00:00:00+03:00",
+                 "2032-01-01t00:00:00Z", "2032-01-01T00:00:00Z")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = make_store(self.tmp.name)
+        w.new(self.store, "proj", "seed")
+
+    def newest(self, topic="proj") -> str:
+        return [ln for ln in read(self.store, topic).split("\n")
+                if ln.startswith("> updated:")][0]
+
+    def test_no_stamp_spelling_can_win_the_newest_line(self):
+        """Every spelling, not the one the last guard happened to recognise. Six of these landed
+        against that guard; only `…T00:00:00Z` was refused."""
+        for spelling in self.SPELLINGS:
+            with self.subTest(spelling=spelling):
+                w.update(self.store, "proj",
+                         f"> essence: real\n> updated: {spelling} FORGED")
+                self.assertNotIn("FORGED", self.newest())
+                self.assertNotIn(spelling, self.newest())
+
+    def test_the_forged_text_is_kept_verbatim_one_column_in(self):
+        """Neutralised, not refused and not deleted — quoting an update-line is legitimate."""
+        w.update(self.store, "proj", "note\n> updated: 2032-01-01T00:00:00Z QUOTED")
+        self.assertIn(" > updated: 2032-01-01T00:00:00Z QUOTED", read(self.store, "proj"))
+
+    def test_a_caller_line_never_adds_an_update_line_to_the_head(self):
+        before = count_update_markers(read(self.store, "proj"))
+        w.update(self.store, "proj",
+                 "a\n> updated: 2032-01-01 X\n> updated: 2033-01-01T00:00:00Z Y")
+        self.assertEqual(count_update_markers(read(self.store, "proj")), before + 1)
+
+    def test_essence_and_new_neutralize_too(self):
+        w.essence(self.store, "proj", "real\n> updated: 2032-01-01 FORGED")
+        w.new(self.store, "fresh", "seed\n> updated: 2033-01-01 FORGED")
+        for topic in ("proj", "fresh"):
+            for ln in read(self.store, topic).split("\n"):
+                self.assertNotIn("FORGED", ln) if ln.startswith("> updated:") else None
+
+    def test_a_non_update_marker_first_line_still_gets_stamped(self):
+        """The root the forgery grew from: any '>'-leading first line passed through verbatim, so
+        `> essence: …` produced content qq never stamped, leaving the caller's own line newest."""
+        w.update(self.store, "proj", "> essence: not an update line")
+        self.assertRegex(self.newest(), r"^> updated: \d{4}-\d{2}-\d{2}T")
+        self.assertIn("> essence: not an update line", self.newest())
+
+    def test_ordinary_and_past_stamped_writes_still_land(self):
+        """Positive control: nothing is refused, and a quoted past stamp survives as text."""
+        w.update(self.store, "proj", "an ordinary note")
+        w.update(self.store, "proj", "quoting\n> updated: 2020-01-01T00:00:00Z an old line")
+        text = read(self.store, "proj")
+        self.assertIn("an ordinary note", text)
+        self.assertIn("2020-01-01", text)
+
+    def test_rewrite_still_refuses_a_future_stamp_rather_than_neutralizing(self):
+        """`qq rewrite` takes a WHOLE FILE, whose update-lines are legitimately update-lines, so
+        neutralising there would corrupt every HEAD it touched. It keeps its refusal and its
+        --allow-future escape hatch."""
+        whole = read(self.store, "proj").replace("# Quintessence — proj",
+                                                  "# Quintessence — proj", 1)
+        forged = whole.replace("## RE-ENTER HERE",
+                                "> updated: 2032-01-01T00:00:00Z FORGED\n## RE-ENTER HERE", 1)
+        with self.assertRaises(w.WriteError) as cm:
+            w.rewrite(self.store, "proj", forged)
+        self.assertEqual(cm.exception.exit_code, 2)
+
+
+class TestWritePathSpeaksTheReadersLineModel(unittest.TestCase):
+    """The write path's decisions are made on the SAME lines and the SAME grammar the readers
+    see (2026-08-09 reader unification). Each test here pins one way the two could differ —
+    and each is red if its own defence is reverted (the newline canonicalization, a neutralizer
+    branch, the fence close, the guard's reader grammar)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = make_store(self.tmp.name)
+        w.new(self.store, "proj", "seed")
+
+    def test_a_lone_cr_cannot_hide_a_forged_update_line(self):
+        """Round-five finding (a): readers read text-mode (universal newlines), so a lone \\r IS
+        a line break to every reader — a guard that splits on \\n never saw the forged line it
+        hid. Canonicalized at ingestion, the neutralizer sees what the readers will."""
+        w.update(self.store, "proj", "note\r> updated: 2032-01-01T00:00:00Z FORGED")
+        text = read(self.store, "proj")
+        self.assertNotIn("\r", text)
+        forged = [it for it in heads.update_lines(text) if "FORGED" in it.marker]
+        self.assertEqual(forged, [])
+        self.assertIn(" > updated: 2032-01-01T00:00:00Z FORGED", text)   # landed, neutralized
+
+    def test_crlf_content_lands_as_lf(self):
+        w.update(self.store, "proj", "first\r\nsecond line")
+        text = read(self.store, "proj")
+        self.assertNotIn("\r", text)
+        self.assertIn("second line", text)
+
+    def test_a_caller_body_header_cannot_bury_older_update_lines(self):
+        """A column-0 '## ' in caller content would END the header region: every older
+        update-line below it becomes body — invisible to count, brief, menu and digest at
+        once. Neutralized the same way a forged marker is: one column right."""
+        before = count_update_markers(read(self.store, "proj"))
+        w.update(self.store, "proj", "note\n## a sneaky section header")
+        text = read(self.store, "proj")
+        self.assertEqual(count_update_markers(text), before + 1)
+        self.assertIn(" ## a sneaky section header", text)
+
+    def test_a_caller_essence_line_cannot_capture_the_essence_column(self):
+        """A column-0 '> essence:' in caller content lands ABOVE the real essence, and the
+        essence read is first-wins — so before neutralization the caller's line won the menu
+        column. `qq essence` is the verb for changing an essence."""
+        w.update(self.store, "proj", "note\n> essence: HIJACKED")
+        _, ess = heads.head_meta(read(self.store, "proj"))
+        self.assertEqual(ess, "seed")
+        self.assertIn(" > essence: HIJACKED", read(self.store, "proj"))
+
+    def test_a_fenced_quoted_example_lands_verbatim_and_stays_inert(self):
+        """Fencing is the CLEAN way to quote an update-line: inside a caller-supplied balanced
+        fence nothing is indented, and the reader treats the example as prose."""
+        before = count_update_markers(read(self.store, "proj"))
+        w.update(self.store, "proj",
+                 "an example:\n```\n> updated: 2032-01-01T00:00:00Z EXAMPLE\n```")
+        text = read(self.store, "proj")
+        self.assertIn("\n> updated: 2032-01-01T00:00:00Z EXAMPLE\n", text)   # NOT indented
+        self.assertEqual(count_update_markers(text), before + 1)
+
+    def test_a_dangling_caller_fence_is_closed_not_left_to_swallow_the_head(self):
+        """An unclosed fence in caller content would put every older update-line below it
+        inside a fence — invisible to every reader. Indenting cannot neutralize a fence (the
+        fence grammar accepts any indent), so the dangling fence is closed with a visible
+        closing-fence line."""
+        before = count_update_markers(read(self.store, "proj"))
+        w.update(self.store, "proj", "quote:\n````\nfenced text with no closing fence")
+        text = read(self.store, "proj")
+        self.assertEqual(count_update_markers(text), before + 1)
+        self.assertIn("fenced text with no closing fence\n````\n", text)
+
+    def test_rewrite_accepts_its_own_rendered_neutralized_quote(self):
+        """Round-five finding (b): the future-stamp guard tolerated leading whitespace where no
+        reader does, so `qq show | qq rewrite` refused a HEAD whose own neutralized (indented)
+        quote carried a future stamp. The guard's grammar is the reader's now."""
+        w.update(self.store, "proj", "note\n> updated: 2032-01-01T00:00:00Z QUOTED")
+        whole = read(self.store, "proj")
+        self.assertIn(" > updated: 2032-01-01T00:00:00Z QUOTED", whole)
+        out = w.rewrite(self.store, "proj", whole)   # must NOT raise
+        self.assertIn("proj", out)
+
+    def test_rewrite_refuses_a_future_date_only_stamp(self):
+        """The old guard's own spelling demanded a full `T..:..:..Z`, so `2032-01-01` — which
+        the reader parses and every surface ranks by — slipped through. Reader grammar closes
+        it."""
+        whole = read(self.store, "proj")
+        forged = whole.replace("## RE-ENTER HERE",
+                                "> updated: 2032-01-01 FORGED\n## RE-ENTER HERE", 1)
+        with self.assertRaises(w.WriteError) as cm:
+            w.rewrite(self.store, "proj", forged)
+        self.assertEqual(cm.exception.exit_code, 2)
+
+    def test_a_malformed_first_line_date_cannot_become_the_stamp(self):
+        """d78810c review, finding 1: the keep-the-caller's-timestamp branch accepted any
+        `YYYY-MM-DDT<anything>` prefix (`_ISO_PREFIX_RE`), looser than the reader — so
+        `2099-12-31Team offsite planning` landed as a date-only 2099 stamp that owned the
+        digest's ranking until 2099. The acceptance now comes from the reader's grammar,
+        narrowed to a full, delimited timestamp: everything else is prose and gets stamped
+        now()."""
+        w.update(self.store, "proj", "2099-12-31Team offsite planning")
+        newest = heads.update_lines(read(self.store, "proj"))[0]
+        self.assertNotEqual(newest.timestamp, "2099-12-31")
+        self.assertRegex(newest.timestamp, r"^20\d{2}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertIn("2099-12-31Team offsite planning", newest.rest)
+
+    def test_a_wellformed_delimited_caller_stamp_is_still_kept_by_the_composer(self):
+        """Positive control on the same branch: the engine-level composer keeps a real,
+        whitespace-delimited timestamp (scripted callers reach it without the stripper). An
+        abutting or fractional variant is prose to the reader, so it is prose here too."""
+        kept = w._normalize_prepend_first_line("2026-01-01T00:00:00Z a note")
+        self.assertEqual(kept, "> updated: 2026-01-01T00:00:00Z a note")
+        bare = w._normalize_prepend_first_line("2026-01-01T00:00:00Z")
+        self.assertEqual(bare, "> updated: 2026-01-01T00:00:00Z")
+        for prose in ("2099-12-31Team offsite", "2026-01-01T00:00:00Zx",
+                      "2026-01-01T00:00:00.123Z note", "2026-01-01 was a good day"):
+            with self.subTest(prose=prose):
+                self.assertRegex(w._normalize_prepend_first_line(prose),
+                                 rf"^> updated: \d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}}Z {re.escape(prose)}$")
+
+    def test_rewrite_accepts_a_fenced_future_example(self):
+        """A fenced example is prose to the reader, so quoting a future-dated line in a fence
+        is legal in a rewrite — the guard asks the reader, not its own regex."""
+        whole = read(self.store, "proj")
+        fenced = whole.replace(
+            "## RE-ENTER HERE",
+            "## RE-ENTER HERE\n\nexample:\n```\n> updated: 2032-01-01T00:00:00Z EXAMPLE\n```", 1)
+        out = w.rewrite(self.store, "proj", fenced)   # must NOT raise
+        self.assertIn("proj", out)

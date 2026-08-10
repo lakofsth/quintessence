@@ -25,7 +25,7 @@ session-resume, whatever it is called there).
 
 ```
 # Quintessence — <topic>
-> updated: <ISO8601>
+> updated: <ISO8601> [<model>, session <id8>] <what changed and why it matters>
 > essence: <ONE line — the single sentence that re-orients the next session. shown in the menu.>
 > session: <session_id>  |  transcript: <path>
 
@@ -61,6 +61,14 @@ Where the full detail lives, to fetch when needed instead of copying it in: tran
 rough location, doc files, memory slugs, code paths. Lets the HEAD stay small while keeping
 the richness one hop away.
 ```
+
+**Do not type the `[<model>, session <id8>]` marker — `qq` derives it.** `qq update` and `qq new`
+read the writing session's model from its own transcript and insert the marker after the stamp;
+off-harness (a human at a terminal, cron) nothing is inserted and the line is exactly as it always
+was. It is a record rather than a claim, which a typed one cannot be: the field a model is least
+reliable about is its own identifier. The commit carrying the write is stamped from the same
+identity **where a `prepare-commit-msg` hook is installed to do it** — that hook is not part of
+this package, so unless you have added one, expect no trailer and check the line alone.
 
 ## Discipline
 - Update the HEAD as you go, not only at exit – an abrupt close should still leave a

@@ -54,7 +54,8 @@ def transcript(base: str, model: str, name: str = "t.jsonl") -> str:
     path = os.path.join(base, name)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write('{"type":"user","message":{"role":"user"}}\n')
-        fh.write(json.dumps({"message": {"model": model, "role": "assistant"}}) + "\n")
+        fh.write(json.dumps({"type": "assistant",
+                              "message": {"model": model, "role": "assistant"}}) + "\n")
     return path
 
 
@@ -78,8 +79,8 @@ class TestModelIdentity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             tp = os.path.join(base, "t.jsonl")
             with open(tp, "w") as fh:
-                fh.write(json.dumps({"message": {"model": OPUS}}) + "\n")
-                fh.write(json.dumps({"message": {"model": SONNET}}) + "\n")
+                fh.write(json.dumps({"type": "assistant", "message": {"model": OPUS}}) + "\n")
+                fh.write(json.dumps({"type": "assistant", "message": {"model": SONNET}}) + "\n")
                 fh.write('{"type":"user","no_model_here":true}\n')
             c = cfg(base, QQ_MODEL_TRANSCRIPT=tp)
             self.assertEqual(authgate.model_identity(c), SONNET)
@@ -102,7 +103,7 @@ class TestModelIdentity(unittest.TestCase):
             proj = os.path.join(base, "home", ".claude", "projects", "-some-dir")
             os.makedirs(proj)
             with open(os.path.join(proj, sid + ".jsonl"), "w") as fh:
-                fh.write(json.dumps({"message": {"model": OPUS}}) + "\n")
+                fh.write(json.dumps({"type": "assistant", "message": {"model": OPUS}}) + "\n")
             with mock.patch.dict(os.environ, {"HOME": os.path.join(base, "home")}):
                 c = cfg(base, env={"CLAUDE_CODE_SESSION_ID": sid})
                 self.assertEqual(authgate.model_identity(c), OPUS)
@@ -110,6 +111,86 @@ class TestModelIdentity(unittest.TestCase):
                 tp = transcript(base, SONNET)
                 c2 = cfg(base, env={"CLAUDE_CODE_SESSION_ID": sid}, QQ_MODEL_TRANSCRIPT=tp)
                 self.assertEqual(authgate.model_identity(c2), SONNET)
+
+    def test_an_unrecognised_newest_entry_stays_unknown_and_untrusted(self):
+        """TRUST does not walk back. `<synthetic>` (Claude Code's API-error / interrupt /
+        compaction marker, on which 22 of 1112 live transcripts end) is the newest entry, so it is
+        the answer — even though a real model id sits behind it. Skipping back could only ever
+        move a session towards trusted, and unknown must mean untrusted. Deliberately the opposite
+        of quintessence.agentid, which validates and walks back because it is labelling, not
+        gating."""
+        with tempfile.TemporaryDirectory() as base:
+            tp = os.path.join(base, "t.jsonl")
+            with open(tp, "w") as fh:
+                fh.write(json.dumps({"type": "assistant", "message": {"model": OPUS}}) + "\n")
+                fh.write(json.dumps({"type": "assistant",
+                                     "message": {"model": "<synthetic>"}}) + "\n")
+            c = cfg(base, QQ_MODEL_TRANSCRIPT=tp)
+            self.assertEqual(authgate.model_identity(c), "<synthetic>")
+            self.assertEqual(authgate.model_mode(c), "unknown")
+
+    def test_a_structured_tool_result_cannot_buy_trust(self):
+        """The trust half of the parse fix, which nothing pinned: reverting model_identity to the
+        old raw `"model":"..."` scan left the whole suite green.
+
+        A transcript whose newest ASSISTANT entry is an untrusted model, followed by a user entry
+        whose STRUCTURED tool result names a trusted one — stored unescaped, as real structured
+        results are. Under the scan the tool result wins and the session reads as trusted enough
+        to author a gated HEAD directly; under the parse it does not."""
+        with tempfile.TemporaryDirectory() as base:
+            tp = os.path.join(base, "t.jsonl")
+            with open(tp, "w") as fh:
+                fh.write(json.dumps({"type": "assistant",
+                                     "message": {"model": "qwen3-coder-30b"}}) + "\n")
+                fh.write(json.dumps({"type": "user",
+                                     "message": {"role": "user", "content": "..."},
+                                     "toolUseResult": {"stdout": "", "model": FABLE}}) + "\n")
+            c = cfg(base, QQ_WRITE_TRUSTED_MODEL=FABLE, QQ_MODEL_TRANSCRIPT=tp)
+            self.assertEqual(authgate.model_identity(c), "qwen3-coder-30b")
+            self.assertEqual(authgate.model_mode(c), "unknown")
+
+    def test_an_unusable_newest_entry_never_reveals_an_older_trusted_one(self):
+        """The fail-OPEN this replaced, and the reason trust needs its own reader.
+
+        Rejecting the newest entry by "keep looking" walks BACKWARDS, and every step back can only
+        surface a different model — here a genuinely older `claude-opus-4-6` behind a session now
+        running an untrusted local model whose newest entry carries a tab. That session writes a
+        gated HEAD directly instead of queuing it. Each character below reached `opus` under the
+        previous shape; a plain `\\n` check would still miss the last three."""
+        for ch in ("\n", "\t", "\r", "\x1b", "\u2028", "\ufeff"):
+            with self.subTest(ch=repr(ch)), tempfile.TemporaryDirectory() as base:
+                tp = os.path.join(base, "t.jsonl")
+                with open(tp, "w") as fh:
+                    fh.write(json.dumps({"type": "assistant",
+                                         "message": {"model": OPUS}}) + "\n")
+                    fh.write(json.dumps({"type": "assistant",
+                                         "message": {"model": f"qwen3-coder-30b{ch}x"}}) + "\n")
+                c = cfg(base, QQ_MODEL_TRANSCRIPT=tp)
+                self.assertEqual(authgate.model_identity(c), "")
+                self.assertEqual(authgate.model_mode(c), "unknown")
+
+    def test_a_missing_model_on_the_newest_entry_also_stops_the_scan(self):
+        with tempfile.TemporaryDirectory() as base:
+            tp = os.path.join(base, "t.jsonl")
+            with open(tp, "w") as fh:
+                fh.write(json.dumps({"type": "assistant", "message": {"model": OPUS}}) + "\n")
+                fh.write(json.dumps({"type": "assistant", "message": {"role": "a"}}) + "\n")
+            c = cfg(base, QQ_MODEL_TRANSCRIPT=tp)
+            self.assertEqual(authgate.model_mode(c), "unknown")
+
+    def test_a_model_value_with_an_embedded_newline_is_not_trusted(self):
+        """Python was the PERMISSIVE side of a bash/python divergence: `claude-opus-5\\n...` matched
+        the trusted `claude-opus-` prefix here while the bash jq branch truncated at the newline and
+        read unknown — and this is the side the write gate uses. `validate=False` means "do not
+        insist on a well-formed id", not "accept anything"."""
+        with tempfile.TemporaryDirectory() as base:
+            tp = os.path.join(base, "t.jsonl")
+            with open(tp, "w") as fh:
+                fh.write(json.dumps({"type": "assistant",
+                                     "message": {"model": "claude-opus-5\nnot-a-model"}}) + "\n")
+            c = cfg(base, QQ_MODEL_TRANSCRIPT=tp)
+            self.assertEqual(authgate.model_identity(c), "")
+            self.assertEqual(authgate.model_mode(c), "unknown")
 
     def test_pathological_session_id_never_globs(self):
         with tempfile.TemporaryDirectory() as base:

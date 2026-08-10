@@ -57,6 +57,7 @@ import os, re, sys, math, datetime, statistics, hashlib, tempfile
 import concurrent.futures as cf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from quintessence import heads  # noqa: E402
 from quintessence.config import Config  # noqa: E402
 from quintessence.search import SearchIndex  # noqa: E402
 from quintessence.slugs import SlugResolver, normalize as slug_normalize  # noqa: E402
@@ -183,7 +184,6 @@ STALE_DAYS = 30
 SIZE_LIMIT = 32 * 1024  # 32kB
 
 LINK_RE = re.compile(r"\[\[([^\]|#]+)")
-UPDATED_RE = re.compile(r"^> updated:\s*(\S+)", re.M)
 
 
 def parse_iso(s):
@@ -270,7 +270,9 @@ def main():
             txt = ""
         body[key] = txt
         size[key] = os.path.getsize(path)
-        dates = [parse_iso(m) for m in UPDATED_RE.findall(txt)]
+        # the one reader (quintessence.heads), not a private regex — memory files have no
+        # update-lines and simply yield an empty list here, exactly as the regex did
+        dates = [parse_iso(it.timestamp) for it in heads.update_lines(txt) if it.timestamp]
         dates = [d for d in dates if d is not None]
         newest_update[key] = max(dates) if dates else None
         targets = set(m.strip() for m in LINK_RE.findall(txt))

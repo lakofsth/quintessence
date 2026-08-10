@@ -50,14 +50,19 @@ printf '%s' "$out" | grep -Eq 'HEAD bloat: update-lines [0-9]+kB / [0-9]+ lines 
   && ok "bloated update-log IS nudged to compact" \
   || no "bloated update-log was not nudged to compact"
 
-# --- ul_region_bytes excludes the body (sanity on the helper via the lib) ---
-# shellcheck disable=SC1090
-. "$ENGINE/qq-lib.sh"
-rb="$(ul_region_bytes "$QUINTESSENCE_DIR/bigbody.md")"
+# --- the region measurement excludes the body (sanity on the engine's own reader) ---
+# (until 2026-08-09 this exercised qq-lib.sh's ul_region_bytes awk; that second implementation
+# of the reader's grammar was deleted with the reader unification — the engine measures via
+# quintessence.heads, so that is what the sanity check exercises now)
+rb="$(PYTHONPATH="$ENGINE" python3 -c '
+import sys
+from quintessence import heads
+print(heads.parse(open(sys.argv[1], encoding="utf-8").read()).update_line_region_bytes)
+' "$QUINTESSENCE_DIR/bigbody.md")"
 fb="$(wc -c <"$QUINTESSENCE_DIR/bigbody.md")"
 { [ "$rb" -lt 200 ] && [ "$fb" -gt 4000 ]; } \
-  && ok "ul_region_bytes measures only the update-line region ($rb of $fb file bytes)" \
-  || no "ul_region_bytes wrong (region=$rb file=$fb)"
+  && ok "update_line_region_bytes measures only the update-line region ($rb of $fb file bytes)" \
+  || no "update_line_region_bytes wrong (region=$rb file=$fb)"
 
 echo "----"
 [ "$fail" -eq 0 ] && echo "test-size-nudge: all $pass passed" || echo "test-size-nudge: $pass passed, $fail FAILED"

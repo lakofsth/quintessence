@@ -171,5 +171,28 @@ class TestSnapshotWriteIsBestEffortButNotSilent(unittest.TestCase):
             self.assertEqual(err.getvalue(), "")
 
 
+class TestEssenceSurfaceUsesTheOneReader(unittest.TestCase):
+    def test_fenced_essence_example_does_not_shadow_the_real_one(self):
+        """2026-08-10, the last stray spelling in the tree: present_tense_surfaces read the
+        first raw '> essence:'-prefixed line, so a fenced example ABOVE the real essence (a
+        quoted HEAD scaffold in an update-line's continuation) was reported as the topic's
+        essence. The one reader (quintessence.heads) treats the fenced line as prose."""
+        with tempfile.TemporaryDirectory() as base:
+            rec = make_reconcile(base)
+            os.makedirs(rec.qdir, exist_ok=True)
+            with open(os.path.join(rec.qdir, "t.md"), "w", encoding="utf-8") as fh:
+                fh.write("# Quintessence — t\n"
+                         "> updated: 2026-08-10T00:00:00Z quoting the scaffold:\n"
+                         "```\n"
+                         "> essence: FAKE example essence\n"
+                         "```\n"
+                         "> essence: the real essence\n\n"
+                         "## S\nbody\n")
+            surfaces = [s for s in rec.present_tense_surfaces() if s[2] == "essence"]
+            self.assertEqual(len(surfaces), 1)
+            self.assertIn("the real essence", surfaces[0][1])
+            self.assertNotIn("FAKE", surfaces[0][1])
+
+
 if __name__ == "__main__":
     unittest.main()

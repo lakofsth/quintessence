@@ -13,7 +13,9 @@
 #   tsk run <name> [--] <command...>   start job; refuses if <name> already running
 #   tsk status [<name>]                list jobs / one job's state+rc
 #   tsk wait <name> [timeout_s]        block until job ends; exits with job rc
-#   tsk log <name>                     print job log path and tail it
+#   tsk log <name>                     print job log path and tail it — after a run that FAILED
+#                                      to start, log/status/rc all still report the PREVIOUS run
+#                                      (its result is restored, so the pair stays consistent)
 #   tsk rc <name>                      print exit code (empty if still running)
 #   tsk stop <name>                    stop the unit (writes the job's rc/done marker)
 #   tsk clean [<name>|--all-finished]  remove job state
@@ -28,6 +30,29 @@ unit(){ echo "tsk-$1.service"; }
   # rules was an accident of implementation, not a boundary of ours. (Indented on purpose:
   # the help fallthrough harvests column-0 `# ` lines, and these are not help.)
 name_ok(){ [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] || die "name must be [A-Za-z0-9_.-]+"; }
+  # One cleanup contract for every way installing a job can fail: leave no state for a job
+  # that never started (.run present must MEAN started) — UNLESS a same-name unit is live,
+  # i.e. this run lost the check-to-create race, where deleting would disarm the live job's
+  # stop-marker. A function rather than three copies: the copies had to stay byte-identical
+  # and a comment saying "same contract as below" is not a mechanism — that is the shell-copy
+  # divergence this estate keeps ledgering. (Indented: the help fallthrough harvests
+  # column-0 `# ` lines and these are not help.)
+stash_back(){   # $1 = job name — put a stashed previous result back where readers look.
+  # Idempotent and existence-guarded, so it is safe from install_failed AND from run's
+  # signal traps (final-round finding: a signal landing between stash and restore used to
+  # strand the previous result where only `clean` could reach it — as deletion, not
+  # restore). After a successful start the stash is already discarded: no-op.
+  [ -f "$STATE/$1:prev.rc" ]   && mv -f "$STATE/$1:prev.rc"   "$STATE/$1.rc"
+  [ -f "$STATE/$1:prev.done" ] && mv -f "$STATE/$1:prev.done" "$STATE/$1.done"
+  return 0
+}
+install_failed(){   # $1 = job name, $2 = message
+  systemctl --user is-active --quiet "$(unit "$1")" || rm -f "$STATE/$1".{run,cmd}
+  # A failed start must not have destroyed the previous run's result. If the failure was a
+  # lost deep race, the live winner rewrites these at its own exit — the newer truth anyway.
+  stash_back "$1"
+  die "$2"
+}
 
 case "${1:-}" in
   run)
@@ -35,16 +60,85 @@ case "${1:-}" in
     [ -n "$name" ] || die "usage: tsk run <name> [--] <command...>"
     name_ok "$name"
     [ $# -ge 1 ] || die "no command given"
-    if systemctl --user is-active --quiet "$(unit "$name")"; then die "job '$name' already running"; fi
-    rm -f "$STATE/$name".{rc,done}
+    # Same-name starts are SERIALIZED by a per-name lock (':' namespace, so it can never be a
+    # job's own state file; held only for the length of this verb). Without it, two `run`s
+    # racing one name both passed the duplicate check, and the loser installed its runner
+    # onto the shared .run path AFTER the winner's unit was created but BEFORE the unit's
+    # process got a CPU slice and opened the script — so the refused caller's command
+    # silently ran under the winner's name, with plausible rc/log/done (reproduced 41/1300
+    # iterations at ambient load, 2026-08-10). The lock refuses the loser before it touches
+    # ANY state file. The lock file is deliberately NOT swept by `clean`: deleting it under a
+    # live holder would hand a third start a fresh inode, and two holders of "the" lock is
+    # the race again.
+    command -v flock >/dev/null 2>&1 || die "flock(1) is required to start jobs (util-linux)"
+    exec 9>"$STATE/$name:run.lock" || die "cannot open start lock"
+    flock -n 9 || die "job '$name' start already in flight (or flock itself failed — its stderr precedes this)"
+    # Duplicate check UNDER the lock, and 'activating' counts as running (is-active reports
+    # it non-zero, and treating it as startable reopens the window the lock just closed). A
+    # manager that mis-reports a live unit as inactive (test 4k's stateful stub) still gets
+    # past this and loses at systemd-run — that deep window remains, and install_failed's
+    # is-active guard is what keeps the live job's files intact inside it.
+    unit_state=$(systemctl --user is-active "$(unit "$name")" 2>/dev/null)
+    case "$unit_state" in active|activating) die "job '$name' already running";; esac
+    # Traps are armed BEFORE the stash, so no signal window exists in which the previous
+    # result sits only in the stash with nothing to bring it back: EXIT and INT/TERM all
+    # restore it via stash_back (idempotent — after a successful start the stash is already
+    # discarded and the EXIT restore is a no-op). A SIGKILL still strands the stash; the
+    # next `run` on the name then INHERITS it as the previous result instead of discarding
+    # it, and `clean` removes it with the rest of the job's state.
+    tmp="$STATE/$name:run.tmp.$$"   # ':' is FORBIDDEN in job names, so this glob namespace
+                                    # can never collide with any job's state files
+    trap 'rm -f "$tmp"; stash_back "$name"' EXIT
+    trap 'rm -f "$tmp"; stash_back "$name"; exit 1' INT TERM
+    # Pre-flight: the previous run's RESULT is STASHED, not deleted — restored on any failed
+    # or interrupted start, discarded once systemd-run succeeds. (Closes the D117 root note:
+    # a failed start used to destroy a completed job's rc/done.) `.log` is deliberately NOT
+    # touched here or in the failure paths — that asymmetry is a RULING [Thomas, 2026-08-09,
+    # ledger D117]: a failed start is exactly when the previous run's output is worth
+    # having. With the restore, log and result stay a CONSISTENT pair after a failed start —
+    # both describe the previous run, and the help line for `log` says so. H6 pins it.
+    # COMPLEMENTARY halves across the two namespaces are an INTERRUPTED stash or restore
+    # (a SIGKILL between the two mvs of either operation leaves exactly one rc and one
+    # done in total, split across live and :prev) — finish the interrupted stash rather
+    # than mistake the stale leftover half for a live result: the OR-check below would
+    # otherwise discard the half-stash holding the real rc (final-round residual finding).
+    # Both directions, one per interrupted operation; a lone live half with NO stash
+    # counterpart is not this shape and takes the normal path.
+    if [ ! -f "$STATE/$name.rc" ] && [ -f "$STATE/$name:prev.rc" ] \
+       && [ -f "$STATE/$name.done" ] && [ ! -f "$STATE/$name:prev.done" ]; then
+      mv -f "$STATE/$name.done" "$STATE/$name:prev.done" \
+        || install_failed "$name" "could not stash the previous result (nothing was started)"
+    fi
+    if [ ! -f "$STATE/$name.done" ] && [ -f "$STATE/$name:prev.done" ] \
+       && [ -f "$STATE/$name.rc" ] && [ ! -f "$STATE/$name:prev.rc" ]; then
+      mv -f "$STATE/$name.rc" "$STATE/$name:prev.rc" \
+        || install_failed "$name" "could not stash the previous result (nothing was started)"
+    fi
+    if [ -f "$STATE/$name.rc" ] || [ -f "$STATE/$name.done" ]; then
+      rm -f "$STATE/$name":prev.{rc,done}   # a live result supersedes any stranded stash
+      # CHECKED stash, same D116 discipline as the runner writes below: an unchecked mv
+      # here left the OLD rc/done in place while `run` reported started, so wait/rc/status
+      # answered with the previous run's result for the new job (final-round finding).
+      if [ -f "$STATE/$name.rc" ]; then
+        mv -f "$STATE/$name.rc" "$STATE/$name:prev.rc" \
+          || install_failed "$name" "could not stash the previous result (nothing was started)"
+      fi
+      if [ -f "$STATE/$name.done" ]; then
+        mv -f "$STATE/$name.done" "$STATE/$name:prev.done" \
+          || install_failed "$name" "could not stash the previous result (nothing was started)"
+      fi
+    fi
+    # (no live result + a stash on disk = a SIGKILLed start's stranded stash: it IS the
+    # previous result — leave it armed for restore-or-supersede rather than discarding)
     printf '%s\n' "$*" > "$STATE/$name.cmd"
     runner="$STATE/$name.run"
     argv_q=$(printf '%q ' "$@")
-    tmp="$STATE/$name:run.tmp.$$"   # ':' is FORBIDDEN in job names, so this glob namespace
-                                    # can never collide with any job's state files
-    trap 'rm -f "$tmp"' EXIT; trap 'rm -f "$tmp"; exit 1' INT TERM   # an interrupted run
-                                            # must not strand its temp (clean also sweeps them)
-    cat > "$tmp" <<EOF
+    # CHECKED write. tsk sets no `-e`, so an unchecked cat discarded its status: a short
+    # write (ENOSPC, quota) left a TRUNCATED script that chmod and the checked rename below
+    # then installed without complaint, systemd-run executed it, and `run` reported success
+    # for a job that never ran its command and never wrote rc/done (ledger D116). Installing
+    # a runner is two steps; hardening only the rename left the write beside it open.
+    cat > "$tmp" <<EOF || install_failed "$name" "could not write runner script (nothing was started)"
 #!/usr/bin/env bash
 exec > "$STATE/$name.log" 2>&1
 echo "[tsk] start \$(date -Is)"
@@ -55,24 +149,21 @@ touch "$STATE/$name.done"
 echo "[tsk] exit rc=\$rc \$(date -Is)"
 exit \$rc
 EOF
-    chmod +x "$tmp"
+    chmod +x "$tmp" || install_failed "$name" "could not make runner script executable (nothing was started)"
     # Rename, never truncate in place: a runner bash that survived a same-name race may
     # still be reading its inode. CHECKED rename: on failure $runner still holds the
     # PREVIOUS run's script, and proceeding would silently execute the wrong command.
-    mv -f "$tmp" "$runner" || { systemctl --user is-active --quiet "$(unit "$name")" \
-        || rm -f "$STATE/$name".{run,cmd};   # same cleanup contract as the systemd-run
-      die "could not install runner script (nothing was started)"; }   # failure below
+    mv -f "$tmp" "$runner" || install_failed "$name" "could not install runner script (nothing was started)"
     # On failure: no state for a job that never started (.run present must MEAN started) —
-    # UNLESS a same-name unit is live, i.e. this run lost the check-to-create race: deleting
-    # then would disarm the live job's stop-marker. Known residuals, recorded not hidden:
-    # the on-disk .run/.cmd then describe the loser; the pre-flight rm of .rc/.done above
-    # already destroyed a just-completed job's result record in the same lost race; and the
-    # race window itself (one manager round trip between duplicate check and unit creation)
-    # remains open. is-active also reports "activating" as inactive, so the guard can still
-    # take the delete branch inside a narrower window.
+    # UNLESS a same-name unit is live, i.e. this run lost the DEEP race (a manager that
+    # mis-reported the live unit as inactive at the check above): deleting then would disarm
+    # the live job's stop-marker. Known residual, recorded not hidden: in that deep race the
+    # on-disk .run/.cmd describe the loser. The CONCURRENT-start race (two `run`s in flight
+    # at once) is closed by the lock above and cannot reach this point; the previous result
+    # is stashed, not destroyed, and install_failed restores it.
     systemd-run --user --unit "tsk-$name" --collect --quiet "$runner" \
-      || { systemctl --user is-active --quiet "$(unit "$name")" \
-             || rm -f "$STATE/$name".{run,cmd}; die "systemd-run failed"; }
+      || install_failed "$name" "systemd-run failed"
+    rm -f "$STATE/$name":prev.{rc,done}   # started: the stashed old result is superseded
     echo "started tsk-$name (log: $STATE/$name.log ; marker: $STATE/$name.done)"
     ;;
   status)
@@ -84,6 +175,8 @@ EOF
     else
       systemctl --user list-units 'tsk-*' --no-legend 2>/dev/null | awk '{print "RUNNING  "$1}'
       for f in "$STATE"/*.done; do [ -e "$f" ] || continue; n=$(basename "$f" .done)
+        case "$n" in *:*) continue;; esac   # ':' is forbidden in job names: this .done is
+                                            # tsk's own bookkeeping (a result stash), not a job
         echo "DONE     tsk-$n.service rc=$(cat "$STATE/$n.rc" 2>/dev/null || echo '?')"; done
     fi
     ;;
@@ -95,9 +188,18 @@ EOF
       systemctl --user is-active --quiet "$(unit "$n")" || { sleep 1; [ -f "$STATE/$n.done" ] || die "job '$n' not running and no done-marker"; break; }
       sleep 2; s=$((s+2)); [ "$t" -gt 0 ] && [ $s -ge "$t" ] && die "timeout waiting for '$n'"
     done
-    rc=$(cat "$STATE/$n.rc" 2>/dev/null); [[ "$rc" =~ ^[0-9]+$ ]] || rc=1   # empty or non-numeric
-    exit "$rc"    # rc file: degrade to 1. (An all-digit value beyond exit's range still crashes
-                  # exit — reachable only by external tampering; the runner writes \$?, 0-255.)
+    rc=$(cat "$STATE/$n.rc" 2>/dev/null)
+    # Degrade anything outside a real exit status to 1. The envelope is 0-255, checked in two
+    # parts on purpose (ledger D97): the digit bound comes FIRST so `[` is never handed a
+    # 20-digit number, which makes it print "integer expression expected" to the user's stderr
+    # instead of failing quietly. Leading zeros are decimal to `exit` (007 is 7, not octal 8),
+    # so three digits is the right bound. Two wrong behaviours this closes, both measured on
+    # this bash rather than reasoned about: 99999999999999999999 crashed exit with "numeric
+    # argument required" (rc 2) — the crash this guard's own comment used to claim it had
+    # removed — and out-of-range values WRAPPED silently: 300 to 44, 999 to 231, -1 to 255,
+    # and 256 to **0**, so a failed job reported success. The silent wrap was the worse half.
+    { [[ "$rc" =~ ^[0-9]{1,3}$ ]] && [ "$rc" -le 255 ]; } || rc=1
+    exit "$rc"
     ;;
   log)
     n="${2:-}"; [ -n "$n" ] || die "usage: tsk log <name>"
@@ -107,6 +209,17 @@ EOF
   rc)   n="${2:?name}"; name_ok "$n"; cat "$STATE/$n.rc" 2>/dev/null ;;
   stop)
     n="${2:?name}"; name_ok "$n"
+    # stop coordinates through the same per-name lock as run and clean (final-round
+    # finding: an unlocked stop racing a clean lost its completion marker — clean deleted
+    # .run between the unit ending and the marker gate below, so a verifiably stopped job
+    # wrote no rc/done and watchers gating on the marker hung). Short wait, then refuse
+    # loudly: the lock is held only for the length of a verb, so sustained contention
+    # means something is wedged, and dying beats silently skipping the marker logic.
+    # No flock on the host = no verb locks anywhere; that degrade is uniform and disclosed.
+    if command -v flock >/dev/null 2>&1; then
+      exec 9>"$STATE/$n:run.lock" || die "cannot open start lock"
+      flock -w 5 9 || die "job '$n' is contended (a start or clean holds the lock) — retry"
+    fi
     systemctl --user stop "$(unit "$n")"; src=$?
     # stop kills the runner's whole cgroup before the runner can write rc/done, so a
     # stopped job would never mark done and watchers gating on the marker would hang.
@@ -125,7 +238,26 @@ EOF
     ;;
   clean)
     if [ "${2:-}" = "--all-finished" ]; then
-      for f in "$STATE"/*.done; do [ -e "$f" ] || continue; n=$(basename "$f" .done); rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.*; done
+      # Each name is swept under its start lock: an in-flight `run` has stashed rc/done (so
+      # this .done-keyed loop normally skips it), but between its lock-acquire and the stash
+      # the .done still exists — sweeping inside that window destroyed the result this
+      # commit's stash exists to protect. Held lock -> skip the name, it is starting, not
+      # finished. No flock on the host means no start can be in flight (run refuses without
+      # it), so sweeping unlocked is then sound.
+      for f in "$STATE"/*.done; do [ -e "$f" ] || continue; n=$(basename "$f" .done)
+        # ':' is forbidden in job names, so a stem carrying one is tsk's own bookkeeping —
+        # the stash's <name>:prev.done satisfies this very glob, and treating it as a job
+        # named "<name>:prev" checked a lock nobody holds and then deleted the REAL stash
+        # through the :prev glob term below (a34f6ac review finding, execution-confirmed).
+        # The scanner's grammar must exclude what its own series added to the corpus.
+        case "$n" in *:*) continue;; esac
+        if command -v flock >/dev/null 2>&1; then
+          exec 7>"$STATE/$n:run.lock" || continue
+          flock -n 7 || continue
+        fi
+        rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.* "$STATE/$n":prev.{rc,done}
+      done
+      exec 7>&- 2>/dev/null
       # Orphan temps have no .done (run's pre-flight rm removed it), so the loop above can
       # never reach them — reclaim by AGE instead, sparing a concurrent run's in-flight temp.
       # -H dereferences the STARTING POINT only. Without it find defaults to -P, which will not
@@ -134,7 +266,18 @@ EOF
       # -H and not -L on purpose: symlinks INSIDE the directory stay unfollowed, so a temp-named
       # symlink is unlinked rather than followed to whatever it points at.
       find -H "$STATE" -maxdepth 1 -name '*:run.tmp.*' -mmin +60 -exec rm -f {} +
-    else n="${2:?name}"; name_ok "$n"; rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.*; fi
+    else
+      n="${2:?name}"; name_ok "$n"
+      # Refuse to clean a name whose start is in flight: an unlocked clean racing `run`'s
+      # stash window deleted the stash AND the log mid-start, silently — the exact loss the
+      # stash exists to prevent (found by the 9a78dfb review). die, not skip: the caller
+      # named this job on purpose and deserves to hear why nothing was removed.
+      if command -v flock >/dev/null 2>&1; then
+        exec 7>"$STATE/$n:run.lock" || die "cannot open start lock"
+        flock -n 7 || die "job '$n' has a start in flight (or flock itself failed) — not cleaning"
+      fi
+      rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.* "$STATE/$n":prev.{rc,done}
+    fi
     ;;
   *) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

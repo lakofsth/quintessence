@@ -64,15 +64,13 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
+from . import agentid
 from .atomicio import atomic_write_text
 from .findings import Finding, FindingsFile
 from .store import Store, state_lock
 
 SECTION = "PROPOSED-WRITES"
 
-# The same pattern qq_model_mode greps: the LAST `"model": "<id>"` occurrence in the
-# transcript, scanning bottom-up (first match within the last line that has one).
-_MODEL_RE = re.compile(r'"model"\s*:\s*"([^"]+)"')
 
 # Where Claude Code keeps session transcripts; <munged-project-dir>/<session-id>.jsonl.
 _PROJECTS_GLOB = os.path.join("~", ".claude", "projects", "*", "{sid}.jsonl")
@@ -99,8 +97,22 @@ def transcript_path(config) -> Optional[str]:
 
 def model_identity(config) -> str:
     """Last-known model id from the session transcript, '' when there is no readable signal.
-    Port of qq_model_mode's read (`tac | grep -m1 -oE '"model": "..."'`): bottom-up, first
-    matching line, first match within it. Never raises — any failure is '' (fail safe)."""
+    Bottom-up, newest entry wins. Never raises — any failure is '' (fail safe).
+
+    Reads `message.model` off entries whose `type` is `assistant`, rather than grepping the raw
+    text for `"model": "..."` the way qq_model_mode's bash original did. That scan is right on
+    every transcript in existence today — measured over 1112 of them, an unescaped match occurs on
+    assistant entries and nowhere else — but what it rests on is that no STRUCTURED tool result
+    carries a `model` key, and structured results ARE stored unescaped on `user` entries. Here
+    that is not a labelling risk but a TRUST decision: `model_mode` maps this string to
+    trusted/untrusted, so a session able to invoke a tool that returns `{"model": "claude-opus-…"}`
+    could read as trusted and write a gated HEAD directly instead of queuing it. Unreachable today
+    and reachable by anything that changes what a tool returns, which is not this module's to
+    guarantee. Found in review after the same scan was replaced in quintessence/agentid.py and the
+    sweep for the rest of the class was not done.
+
+    The raw-scan fallback is deliberately absent: on a trust decision, an unparseable transcript
+    must read as '' (unknown, untrusted), never as a guess."""
     try:
         tp = transcript_path(config)
         if not tp or not os.path.isfile(tp):
@@ -108,9 +120,18 @@ def model_identity(config) -> str:
         with open(tp, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
         for ln in reversed(lines):
-            m = _MODEL_RE.search(ln)
-            if m:
-                return m.group(1)
+            is_assistant, model = agentid.assistant_entry_model(ln)
+            if not is_assistant:
+                continue
+            # The NEWEST assistant entry is final, whatever it says. Never walk past it: every
+            # step backwards can only find a different model, and the only direction that matters
+            # is that it must never be a MORE trusted one than the session is actually running.
+            # Unprintable rejects the control characters that split a line and the format
+            # characters (U+2028/9, U+FEFF) that a `\n`-only check misses — and rejects to "",
+            # which is unknown, which is untrusted.
+            if not model or not model.isprintable():
+                return ""
+            return model
         return ""
     except Exception:
         return ""

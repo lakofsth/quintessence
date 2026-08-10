@@ -1228,13 +1228,18 @@ class TestWriteVerbIntegration(unittest.TestCase):
         self.assertNotEqual(rec2["line_ts"], "2026-01-02T03:04:05Z")
 
     def test_rewrite_novel_update_line_keeps_its_stamp(self):
+        # The novel update-line goes into the HEADER region (right after the title), where a
+        # real rewrite puts one. Until the 2026-08-09 reader unification this fixture appended
+        # it at EOF — BODY region — and the whole-file bucketing still read it as an
+        # update-line there; the one reader treats a body '> updated:' as prose, so an
+        # EOF-appended line now (correctly) binds under the None bucket at bind time instead.
         new_ref = os.path.join(self.tmp, "rw-artifact")
         with open(new_ref, "w") as fh:
             fh.write("y")
-        full = self.store.read_head("T")
+        lines = self.store.read_head("T").split("\n")
+        lines.insert(1, f"> updated: 2026-02-03T04:05:06Z see {new_ref}")
         with captured_stderr():
-            w.rewrite(self.store, "T",
-                       full + f"\n> updated: 2026-02-03T04:05:06Z see {new_ref}\n")
+            w.rewrite(self.store, "T", "\n".join(lines))
         rec = [x for x in read_records(self.store) if x["id"] == new_ref][-1]
         self.assertEqual(rec["line_ts"], "2026-02-03T04:05:06Z")
 

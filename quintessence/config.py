@@ -434,10 +434,10 @@ KEYS: list[KeyDef] = [
            "session is not trusted. Mostly a seam for tests and integration."),
 
     # ---- contract version -----------------------------------------------------------------
-    KeyDef("QQ_CONTRACT_VERSION", "int", 2, "internal-constant",
+    KeyDef("QQ_CONTRACT_VERSION", "int", 3, "internal-constant",
            "The version marker ('qq-contract vN') the installed CONTRACT.md must carry. Not "
            "overridable from the environment on the bash side, where qq-lib.sh assigns "
-           "`QQ_CONTRACT_VERSION=2` outright rather than `${VAR:-2}`. Registered here so a "
+           "`QQ_CONTRACT_VERSION=3` outright rather than `${VAR:-3}`. Registered here so a "
            "check of CONTRACT.md has one source of truth to compare against."),
 
     # ---- Tier-1 deterministic check toggles/budgets ---------------------------------------

@@ -24,7 +24,7 @@ from typing import Optional
 
 from .config import Config
 from .findings import FindingsFile, parse_line
-from .heads import count_update_markers, head_meta, legacy_brief
+from .heads import count_update_markers, head_meta, legacy_brief, stamp_datetime, stamp_of
 from .refsview import RefsView
 from .store import Store, StorePathError
 
@@ -98,18 +98,17 @@ def render_menu(store: Store) -> str:
 
 
 # ---- digest ---------------------------------------------------------------------------------
-_DATE10_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-
-
 def _epoch_of(updated_raw: str) -> int:
-    m = _DATE10_RE.search(updated_raw)
-    if not m:
-        return 0
-    try:
-        y, mo, d = (int(x) for x in m.group(0).split("-"))
-        return int(datetime(y, mo, d, tzinfo=timezone.utc).timestamp())
-    except ValueError:
-        return 0
+    """Epoch of an UPDATED column value (head_meta's rest string) for the digest's age ranking.
+    The stamp is the one reader's LEADING stamp (heads.stamp_of) — until 2026-08-09 this
+    searched for the first date-shaped run ANYWHERE in the line, a third stamp grammar that let
+    a date inside prose capture the ranking (and was why the derived agent marker could not be
+    placed before the stamp). Date precision on purpose, not seconds: same-day HEADs have
+    always ranked as ties resolved by the sort binary, and finer ranking would be a behaviour
+    change, not a refactor."""
+    ts = stamp_of(updated_raw)
+    dt = stamp_datetime(ts[:10]) if ts else None
+    return int(dt.timestamp()) if dt else 0
 
 
 def _truncate_essence(ess: str, width: int = 160) -> str:

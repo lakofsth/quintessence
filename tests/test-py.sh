@@ -22,4 +22,11 @@ trap 'rm -rf "$QQ_CACHE_SCRATCH"' EXIT
 : "${QQ_CACHE:=$QQ_CACHE_SCRATCH/embeddings.json}"
 export QQ_CACHE
 
+# Neutralize the ambient agent-session identity, for the same reason and in the same three places
+# as the scratch cache above: `qq update` derives an update-line marker from it (agentid.py), so a
+# suite run BY an agent session would otherwise assert against different bytes than one run by a
+# human. Unconditional, not "caller wins" — here the ambient value is the contaminant, and a test
+# that wants a marker sets one for its own case.
+unset CLAUDE_CODE_SESSION_ID
+
 PYTHONPATH="$ENGINE${PYTHONPATH:+:$PYTHONPATH}" python3 -m unittest discover -s tests/py -p 'test_*.py' -v

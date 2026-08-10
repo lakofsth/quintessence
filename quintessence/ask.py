@@ -45,6 +45,7 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+from . import heads
 from .config import Config
 from .refsview import RefsView
 from .search import SearchIndex
@@ -167,21 +168,21 @@ class Ask:
     _NEWEST_UPDATE_CAP = 280
 
     def _parse_newest_update(self, path: str):
-        """Return (date_str, full_line) for the first '> updated:' line near the file top."""
+        """Return (rest, full_line) for the file's first REAL update-line, per the one reader
+        (heads.update_lines). Until 2026-08-09 this matched a stripped line against its own
+        regex, which made it the sole reader that tolerated leading whitespace — so the write
+        path's one-space neutralization of a quoted update-line did not neutralize it HERE, and
+        the evidence pack could date a source by a quoted line every other surface ignored. It
+        also only looked at the first 20 raw lines; the reader reads the header region."""
         full = os.path.join(HOME, path)
         try:
             with open(full, encoding="utf-8", errors="replace") as f:
-                for _ in range(20):
-                    line = f.readline()
-                    if not line:
-                        break
-                    stripped = line.strip()
-                    m = re.match(r"^> updated:\s*(.+)$", stripped)
-                    if m:
-                        return m.group(1).strip(), stripped
+                items = heads.update_lines(f.read())
         except OSError:
-            pass
-        return None, None
+            return None, None
+        if not items:
+            return None, None
+        return items[0].rest.strip(), items[0].marker.strip()
 
     def _updated_date(self, path: str):
         date, _ = self._parse_newest_update(path)
