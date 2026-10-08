@@ -346,8 +346,8 @@ KEYS: list[KeyDef] = [
            "write. Set QQ_BIND=0 to turn binding off entirely."),
     KeyDef("QQ_BIND_REPOS", "csv", [], "binding",
            "Repo-alias map for commit-token binding: comma-separated alias=path entries (e.g. "
-           "dist=~/quintessence-dist,infra=~/infra). A commit sha in prose binds when prefixed "
-           "by one of these alias words ('dist 7ac40b3'), or as a bare 7-12-hex token when "
+           "notes=~/notes,ops=~/ops). A commit sha in prose binds when prefixed "
+           "by one of these alias words ('notes 7ac40b3'), or as a bare 7-12-hex token when "
            "exactly one of these repos resolves it as a commit (one batched `git cat-file "
            "--batch-check` per unique repo per write; if none or several resolve it, nothing "
            "binds, so prose hex-lookalikes never bind by shape alone). Repo-relative paths "

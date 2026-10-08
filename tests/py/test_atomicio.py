@@ -184,9 +184,9 @@ class TestAtomicWrite(unittest.TestCase):
 
     def test_utf8_roundtrip(self):
         p = self._p("f")
-        atomic_write_text(p, "Juusjärvi — ä\n")
+        atomic_write_text(p, "ääkköset — ä\n")
         with open(p, encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "Juusjärvi — ä\n")
+            self.assertEqual(fh.read(), "ääkköset — ä\n")
 
     def test_dangling_symlink_creates_the_target(self):
         """A link whose target does not exist yet: write the target, keep the link."""

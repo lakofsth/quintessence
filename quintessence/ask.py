@@ -266,7 +266,7 @@ class Ask:
 
     # `enable_thinking: False` above asks a Qwen-family chat template to skip its reasoning pass.
     # That key is a TEMPLATE CONVENTION, not a protocol guarantee, and the endpoint behind
-    # :11435 is swappable at will (~/llm-config/ca-substrates.ini + ca-substrate-swap), so a
+    # the configured port is swappable at will (the operator's own substrate config), so a
     # profile that ignores it is a matter of when, not if. Two shapes appear when it is ignored:
     # the reasoning arrives inline in `content` (llama-server run with --reasoning-format none),
     # or the server splits it out and `content` comes back EMPTY (the default deepseek format,

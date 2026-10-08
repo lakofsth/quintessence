@@ -49,7 +49,7 @@ def scratch_git_identity_env(scratch_home: str, *, configured: bool):
     of the `with` block: patches os.environ (HOME + GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM, so
     global/system scope can't fall through to this machine's real identity) and os.chdir()s into
     a fresh, non-repo scratch directory (so there is no local repo-scope config to leak in
-    either — quintessence-dist's OWN .git has a real user.name/user.email configured locally).
+    either — this repository's OWN .git has a real user.name/user.email configured locally).
     `configured=True` writes a throwaway global config with a fake identity first."""
     global_cfg = os.path.join(scratch_home, ".gitconfig")
     if configured:
