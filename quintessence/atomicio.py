@@ -442,6 +442,11 @@ def _atomic_write_to(target: str, encoding: str, mode: int | None = None):
             with contextlib.suppress(OSError):
                 os.chmod(tmp, carry)
         yield fh
+        # Reach the platter before the rename: a crash between replace and writeback left a
+        # zero-length config or state file on some filesystems (posture review 2026-10-08, L3).
+        # INVARIANTS.md: durable-writes-reach-the-platter-before-the-rename.
+        fh.flush()
+        os.fsync(fh.fileno())
         fh.close()
         os.replace(tmp, target)
     except BaseException:

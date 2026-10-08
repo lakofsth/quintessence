@@ -300,7 +300,7 @@ def render_fact(store: Store, name: str) -> str:
     boundary that stops a model from generalising to `qq update <fact>`. `<name>` is the slug as
     `qq search` emits it (with or without the `.md` suffix). On a miss, suggest near names."""
     slug = name[:-3] if name.endswith(".md") else name
-    p = store.memdir / f"{slug}.md"
+    p = store.memory_path(slug)      # guarded: no traversal out of the memory store (L1)
     if not p.is_file():
         names = [q.stem for q in sorted(store.memdir.glob("*.md"))] if store.memdir.is_dir() else []
         near = difflib.get_close_matches(slug, names, n=3)
@@ -395,6 +395,14 @@ def render_check_write_summary(tier1_count: int, xref_count: Optional[int], find
 
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
 
+# A "ready command" is one of the producers' own template shapes: a qq verb over slug-safe
+# arguments. A backticked span in an AUDIT line (LLM-written) or inside a PROPOSED write's text
+# (the untrusted model's own prose) is not promoted whatever it says (posture review
+# 2026-10-08, M9). INVARIANTS.md: a-ready-command-comes-from-the-template.
+_READY_CMD_RE = re.compile(
+    r"qq (?:check --write|compact|waveoff|brief|show|update|rewrite|finalize|reindex|fact|menu)"
+    r"(?: [A-Za-z0-9][A-Za-z0-9._-]*)*")
+
 
 def render_findings_next(store: Store, config: Config, findings: FindingsFile) -> str:
     """Port of qq's `findings_next`: full adjudication context for the topmost pending finding
@@ -449,7 +457,10 @@ def render_findings_next(store: Store, config: Config, findings: FindingsFile) -
                     f"meanwhile: qq brief {h}\n")
         return out
 
-    cmds = _BACKTICK_RE.findall(line)
+    if finding.cls == "PROPOSED write" and {"verb", "head"} <= finding.fields.keys():
+        cmds = [f"qq {finding.fields['verb']} {finding.fields['head']}"]
+    else:
+        cmds = [c for c in _BACKTICK_RE.findall(line) if _READY_CMD_RE.fullmatch(c)]
     out += "to resolve:\n"
     for c in cmds:
         out += f"  {c}\n"

@@ -66,17 +66,21 @@ _cfg_pref QQ_MEMDIR "${_mem_explicit:-}" "$QQ_MEMDIR"
 if [ "$WIRE" -eq 1 ]; then
   command -v python3 >/dev/null || { echo "  ✗ --wire-claude needs python3"; exit 1; }
   HERE="$HERE" CLAUDE_SETTINGS="$CLAUDE_SETTINGS" python3 - <<'PY'
-import json, os, shutil, stat, sys, time
+import json, os, shlex, shutil, stat, sys, time
 here = os.environ["HERE"]; path = os.environ["CLAUDE_SETTINGS"]
 # Desired qq hooks: (event, matcher-or-None, command, [substrings that ID an existing qq hook to
 # reconcile]). A hook is "ours" if its command contains any recognizer — so we repoint a drifted
 # path (e.g. an old engine dir) or a hand-written equivalent, and NO-OP once it already matches.
+# The dist path is shell-quoted at the interpolation (shlex.quote): a path holding a quote or
+# a dollar used to break or expand inside the hook command (L8).
+def _hook(rel):
+    return "bash " + shlex.quote(os.path.join(here, rel))
 desired = [
-  ("SessionStart",   None,   f'bash "{here}/hooks/inject-contract.sh"',
+  ("SessionStart",   None,   _hook("hooks/inject-contract.sh"),
        ["inject-contract.sh", "CONTINUITY DISCIPLINE", "CONTRACT.md"]),
-  ("UserPromptSubmit", None, f'bash "{here}/resume-match.sh"',     ["resume-match.sh"]),
-  ("PreToolUse",     "Bash", f'bash "{here}/prederive-recall.sh"', ["prederive-recall.sh"]),
-  ("Stop",           None,   f'bash "{here}/finalize-check.sh"',   ["finalize-check.sh"]),
+  ("UserPromptSubmit", None, _hook("resume-match.sh"),     ["resume-match.sh"]),
+  ("PreToolUse",     "Bash", _hook("prederive-recall.sh"), ["prederive-recall.sh"]),
+  ("Stop",           None,   _hook("finalize-check.sh"),   ["finalize-check.sh"]),
 ]
 # THE SYMLINK-CYCLE REFUSAL SITS BEFORE THE READ, and the position is the whole of it. This check
 # used to live beside the write, where the engine has it — and there it could never fire, because

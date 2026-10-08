@@ -125,9 +125,16 @@ class TestConfigParity(unittest.TestCase):
     def test_empty_value(self):
         self.assert_parity("QQ_KB_ROOT=\n", ["QQ_KB_ROOT"])
 
-    def test_arbitrary_non_qq_identifier_key_still_loads(self):
-        # both bash and python originals parse ANY valid-identifier key, not just QQ_*
+    def test_xdg_keys_load_on_both_sides(self):
+        # the XDG bases the defaults read are part of the allowlist, on both sides
         self.assert_parity("XDG_STATE_HOME=/custom/state\n", ["XDG_STATE_HOME"])
+
+    def test_other_identifier_keys_are_ignored_on_both_sides(self):
+        # posture review 2026-10-08 (M2): the originals parsed ANY identifier, and bash exported
+        # it into every hook — PYTHONPATH, BASH_ENV, PATH. Both sides now ignore such a key; the
+        # parity that matters is that neither loads it.
+        self.assert_parity("PYTHONPATH=/evil\nBASH_ENV=/evil\nQQ_KB_ROOT=/a/b\n",
+                            ["PYTHONPATH", "BASH_ENV", "QQ_KB_ROOT"])
 
 
 if __name__ == "__main__":

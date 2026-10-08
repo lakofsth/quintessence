@@ -66,6 +66,7 @@ from typing import Optional
 from .atomicio import (TEMP_GRACE_SECONDS, atomic_write, atomic_write_json,
                        best_effort_write, is_generated_temp_name)
 from .config import Config
+from . import httpdirect
 from .store import LockTimeout, acquire_flock
 
 HOME = os.path.expanduser("~")
@@ -251,7 +252,7 @@ class SearchIndex:
             data=json.dumps({"model": self.embed_model, "prompt": prefix + text,
                              "keep_alive": self.keep_alive, "options": options}).encode(),
             headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with httpdirect.urlopen(req, timeout=60) as r:
             return json.load(r)["embedding"]
 
     def embed(self, text: str, prefix: str):
@@ -305,8 +306,22 @@ class SearchIndex:
                 break
         return "\n".join(out).strip() or None
 
+    @staticmethod
+    def _inside_root(root_real: str, dp: str, d: str) -> bool:
+        """A directory entry the walk may descend into: its REAL path is under the root's real
+        path. The walk follows symlinks so a corpus source may itself be a link, but a link from
+        inside a source to anywhere outside it (`.quintessence/escape -> ~`) would index every
+        note and script header it reaches and surface them as recall (posture review
+        2026-10-08, M5b). INVARIANTS.md: a-project-store-is-one-this-operator-scaffolded."""
+        full = os.path.join(dp, d)
+        if not os.path.islink(full):
+            return True
+        real = os.path.realpath(full)
+        return real == root_real or real.startswith(root_real + os.sep)
+
     def _files(self, root: str):
         seen = set()
+        root_real = os.path.realpath(root)
         for dp, dirs, names in os.walk(root, followlinks=True):
             rp = os.path.realpath(dp)
             if rp in seen:
@@ -314,7 +329,8 @@ class SearchIndex:
                 continue
             seen.add(rp)
             dirs[:] = [d for d in dirs
-                       if not any(x in os.path.join(dp, d) + "/" for x in self.exclude)]
+                       if not any(x in os.path.join(dp, d) + "/" for x in self.exclude)
+                       and self._inside_root(root_real, dp, d)]
             for n in sorted(names):
                 if n.startswith("transcript-"):
                     continue
@@ -686,6 +702,7 @@ class SearchIndex:
         for _label, root, _whole in self._iter_sources():
             if not os.path.isdir(root):
                 continue
+            root_real = os.path.realpath(root)
             for dp, dirs, names in os.walk(root, followlinks=True):
                 rp = os.path.realpath(dp)
                 if rp in seen:
@@ -693,7 +710,8 @@ class SearchIndex:
                     continue
                 seen.add(rp)
                 dirs[:] = [d for d in dirs
-                           if not any(x in os.path.join(dp, d) + "/" for x in self.exclude)]
+                           if not any(x in os.path.join(dp, d) + "/" for x in self.exclude)
+                           and self._inside_root(root_real, dp, d)]
                 try:
                     dm = os.stat(dp).st_mtime
                     if dm > newest:
@@ -842,7 +860,7 @@ class SearchIndex:
 
     def probe_embedder(self):
         try:
-            with urllib.request.urlopen(f"{self.ollama_url}/api/tags", timeout=4) as r:
+            with httpdirect.urlopen(f"{self.ollama_url}/api/tags", timeout=4) as r:
                 names = [m.get("name", "") for m in json.load(r).get("models", [])]
         except Exception as e:
             return False, f"unreachable at {self.ollama_url} ({type(e).__name__}) – is ollama running?"

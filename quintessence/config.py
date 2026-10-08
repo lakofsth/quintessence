@@ -369,6 +369,13 @@ KEYS: list[KeyDef] = [
            "gets the loud born-stale warning. Re-checking happens in the sweep only – the read "
            "side never runs ssh, it just marks the ref suspect. Empty by default: no remote "
            "binding until you name your hosts."),
+    KeyDef("QQ_PROJECT_STORES", "csvpath", [], "store",
+           "Optional allowlist of PROJECT ROOTS (comma-separated directories, `~` expanded) whose "
+           "`.quintessence/` walk-up discovery may use. Unset (the default): any discovered "
+           "project store that carries the scaffold `qq init --project` writes is accepted. "
+           "Set: the root must ALSO be listed. Discovery never accepts a bare `.quintessence/` "
+           "directory — one that arrived inside a cloned or unpacked repository is ignored "
+           "rather than becoming the write target and the recall source."),
     KeyDef("QQ_BIND_EXCLUDE_ROOTS", "csvpath", ["/run", "/proc", "/sys", "/tmp", "/dev"], "binding",
            "Top-level roots the file extractor and the trigger-side resolver "
            "(refs-resolve.py) ignore: comma-separated absolute directories. `~/...` members "
@@ -640,6 +647,12 @@ class Config:
                 v = v[1:-1]
             if not k.isidentifier():
                 continue
+            # The same allowlist qq-config.sh exports (parity, pinned by test_config_parity):
+            # a config file carries quintessence's own keys and the XDG bases its defaults read.
+            # Anything else in the file is ignored on both sides — PYTHONPATH, BASH_ENV, PATH
+            # were exported into every hook before (posture review 2026-10-08, M2).
+            if not (k.startswith("QQ_") or k == "QUINTESSENCE_DIR" or k.startswith("XDG_")):
+                continue
             out.setdefault(k, v)
         return out
 
@@ -736,6 +749,40 @@ class Config:
         else:
             value = self._coerce(kd.type, raw)
         self._cache[name] = value
+        return value
+
+    def get_noenv(self, name: str) -> Any:
+        """`get` with the environment left out: constructor overrides > config file > registry
+        default. For keys that are POLICY about the calling session rather than configuration of
+        it — the authoring gate's — because the session being judged controls its own
+        environment and an env prefix on the gated verb switched the gate off (posture review
+        2026-10-08, M3). Overrides stay honoured: they are an in-process seam, not a channel the
+        gated session reaches. Cached separately from `get`."""
+        ck = ("noenv", name)
+        if ck in self._cache:
+            return self._cache[ck]
+        kd = KEYS_BY_NAME.get(name)
+        if kd is None:
+            raise KeyError(f"{name!r} is not a registered quintessence config key")
+        if name in self._overrides and self._overrides[name] is not None:
+            raw: Optional[str] = str(self._overrides[name])
+        elif name in self._file_values:
+            raw = self._file_values[name]
+        else:
+            raw = None
+        if raw is None:
+            default = kd.default(self) if callable(kd.default) else kd.default
+            if kd.type in _BOOL_TYPES and default is None:
+                value: Any = _BOOL_UNSET_DEFAULT[kd.type]
+            elif isinstance(default, str):
+                value = self._coerce(kd.type, default)
+            elif kd.type == "csvpath" and isinstance(default, list):
+                value = [_expanduser(self, str(p)) for p in default]
+            else:
+                value = default
+        else:
+            value = self._coerce(kd.type, raw)
+        self._cache[ck] = value
         return value
 
     # ---- ergonomic typed wrappers (thin; `get` is the source of truth) ----------------------

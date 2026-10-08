@@ -8,8 +8,10 @@
 # engineering something already solved (the "still-guessing" failure).
 #
 # Discipline: ALLOWLIST-gated (fires only on ops-SETUP commands, not everything) + DISCOUNTER (silent unless a high-confidence hit),
-# deduped per artifact per session (never nag twice), bounded latency, NEVER blocks the tool
-# (always permissionDecision=allow), silent on any failure. Tune THRESH from live behaviour.
+# deduped per artifact per session (never nag twice), bounded latency, NEVER decides permission
+# (additionalContext only — an earlier `permissionDecision:"allow"` meant "skip the prompt", so a
+# privileged command that matched the allowlist and scored a hit ran unprompted; posture review
+# 2026-10-08, H1), silent on any failure. Tune THRESH from live behaviour.
 set -u
 ENGINE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 . "$ENGINE/qq-config.sh"
@@ -71,5 +73,5 @@ key=$(printf '%s' "$loc" | sha1sum | cut -c1-16)
 touch "$dir/$key" 2>/dev/null
 
 msg="📎 Likely already documented (qq-search ${score}): \`${loc}\`. Before reverse-engineering this, read it (qq-search / open the file) — there may be an existing runbook, script-header, or decided HEAD."
-jq -nc --arg c "$msg" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",additionalContext:$c}}'
+jq -nc --arg c "$msg" '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:$c}}'
 exit 0

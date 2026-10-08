@@ -30,6 +30,13 @@ _qq_load_config() {
     val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
     # key must be a valid identifier — skip a malformed key, never silently mangle it
     case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+    # and one of OURS: only QQ_*, QUINTESSENCE_DIR and XDG_* are exported (the python parser,
+    # Config._parse_dotenv, keeps the same allowlist — parity). Every hook execs python and
+    # bash with this environment, so exporting any identifier the file held reached PYTHONPATH,
+    # BASH_ENV, LD_PRELOAD, PATH (posture review 2026-10-08, M2) — the comment above about a
+    # config file not executing code was true of this loader and false of what it exported.
+    # INVARIANTS.md: config-set-writes-one-line-of-one-registered-shape.
+    case "$key" in QQ_*|QUINTESSENCE_DIR|XDG_*) ;; *) continue ;; esac
     case "$val" in                                   # strip one layer of surrounding quotes
       \"*\") val="${val#\"}"; val="${val%\"}" ;;
       \'*\') val="${val#\'}"; val="${val%\'}" ;;

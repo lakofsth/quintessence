@@ -24,6 +24,16 @@ from quintessence.storepath import (
     StoreLocation,
     resolve_store_path,
 )
+from quintessence.admin import _PRE_COMMIT_HOOK
+
+
+def _scaffold(store_dir: str) -> None:
+    """A project store as discovery accepts it since the 2026-10-08 posture review (M5): a bare
+    directory is not a store; it must carry the scaffold `qq init --project` writes."""
+    hooks = os.path.join(store_dir, ".git", "hooks")
+    os.makedirs(hooks, exist_ok=True)
+    with open(os.path.join(hooks, "pre-commit"), "w", encoding="utf-8") as fh:
+        fh.write(_PRE_COMMIT_HOOK)
 
 
 class TestDegenerateCase(unittest.TestCase):
@@ -52,7 +62,7 @@ class TestExplicitDirWins(unittest.TestCase):
     def test_env_quintessence_dir_skips_project_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             proj = os.path.join(tmp, "proj")
-            os.makedirs(os.path.join(proj, PROJECT_STORE_DIRNAME))   # a project store DOES exist
+            _scaffold(os.path.join(proj, PROJECT_STORE_DIRNAME))   # a project store DOES exist
             explicit = os.path.join(tmp, "explicit-store")
             os.makedirs(explicit)
             cfg = Config(env={"QUINTESSENCE_DIR": explicit}, config_file="/nonexistent", overrides={})
@@ -64,7 +74,7 @@ class TestExplicitDirWins(unittest.TestCase):
     def test_override_quintessence_dir_skips_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             proj = os.path.join(tmp, "proj")
-            os.makedirs(os.path.join(proj, PROJECT_STORE_DIRNAME))
+            _scaffold(os.path.join(proj, PROJECT_STORE_DIRNAME))
             explicit = os.path.join(tmp, "ov-store")
             cfg = Config(env={}, config_file="/nonexistent", overrides={"QUINTESSENCE_DIR": explicit})
             sp = resolve_store_path(cwd=proj, env={}, config=cfg, home=tmp)
@@ -83,7 +93,7 @@ class TestExplicitDirWins(unittest.TestCase):
                 f.write(f"QUINTESSENCE_DIR={user_qdir}\n")
             proj = os.path.join(tmp, "proj")
             pstore = os.path.join(proj, PROJECT_STORE_DIRNAME)
-            os.makedirs(pstore)
+            _scaffold(pstore)
             cfg = Config(env={}, config_file=cfgfile, overrides={})
             sp = resolve_store_path(cwd=proj, env={}, config=cfg, home=tmp)
             self.assertFalse(sp.explicit)               # NOT pinned
@@ -107,7 +117,7 @@ class TestProjectDiscovery(unittest.TestCase):
             deep = os.path.join(proj, "src", "pkg")
             os.makedirs(deep)
             pstore = os.path.join(proj, PROJECT_STORE_DIRNAME)
-            os.makedirs(pstore)
+            _scaffold(pstore)
             cfg = self._cfg_user(home)
             sp = resolve_store_path(cwd=deep, env={}, config=cfg, home=home)
             self.assertFalse(sp.explicit)
@@ -121,10 +131,10 @@ class TestProjectDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             # a walk-up store AND a CLAUDE_PROJECT_DIR store both exist; CPD wins.
             walk_proj = os.path.join(home, "a")
-            os.makedirs(os.path.join(walk_proj, PROJECT_STORE_DIRNAME))
+            _scaffold(os.path.join(walk_proj, PROJECT_STORE_DIRNAME))
             cpd = os.path.join(home, "b")
             cpd_store = os.path.join(cpd, PROJECT_STORE_DIRNAME)
-            os.makedirs(cpd_store)
+            _scaffold(cpd_store)
             cwd = os.path.join(walk_proj, "deep")
             os.makedirs(cwd)
             cfg = self._cfg_user(home)
@@ -136,7 +146,7 @@ class TestProjectDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             walk_proj = os.path.join(home, "a")
             wstore = os.path.join(walk_proj, PROJECT_STORE_DIRNAME)
-            os.makedirs(wstore)
+            _scaffold(wstore)
             cpd = os.path.join(home, "b")            # set but has NO .quintessence
             os.makedirs(cpd)
             cwd = os.path.join(walk_proj, "deep")
@@ -148,7 +158,7 @@ class TestProjectDiscovery(unittest.TestCase):
     def test_walk_up_stops_at_home(self):
         # a .quintessence ABOVE home must not be picked up (walk stops at home).
         with tempfile.TemporaryDirectory() as root:
-            os.makedirs(os.path.join(root, PROJECT_STORE_DIRNAME))   # above home
+            _scaffold(os.path.join(root, PROJECT_STORE_DIRNAME))   # above home
             home = os.path.join(root, "home", "thomas")
             cwd = os.path.join(home, "proj")
             os.makedirs(cwd)
@@ -162,7 +172,7 @@ class TestProjectDiscovery(unittest.TestCase):
         discovered by the walk-up from anywhere under home (else it would shadow every
         $HOME-rooted invocation and break the degenerate case)."""
         with tempfile.TemporaryDirectory() as home:
-            os.makedirs(os.path.join(home, PROJECT_STORE_DIRNAME))   # stray store AT home
+            _scaffold(os.path.join(home, PROJECT_STORE_DIRNAME))   # stray store AT home
             cwd = os.path.join(home, "work", "deep")
             os.makedirs(cwd)
             cfg = Config(env={}, config_file="/nonexistent", overrides={})
@@ -175,7 +185,7 @@ class TestProjectDiscovery(unittest.TestCase):
         """Claude Code launched AT $HOME sets CLAUDE_PROJECT_DIR=$HOME in hooks — the home
         exclusion must hold on that branch as well, not just the walk-up."""
         with tempfile.TemporaryDirectory() as home:
-            os.makedirs(os.path.join(home, PROJECT_STORE_DIRNAME))
+            _scaffold(os.path.join(home, PROJECT_STORE_DIRNAME))
             cfg = Config(env={}, config_file="/nonexistent", overrides={})
             sp = resolve_store_path(cwd=home, env={"CLAUDE_PROJECT_DIR": home},
                                     config=cfg, home=home)

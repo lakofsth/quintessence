@@ -133,6 +133,9 @@ case "${1:-}" in
     printf '%s\n' "$*" > "$STATE/$name.cmd"
     runner="$STATE/$name.run"
     argv_q=$(printf '%q ' "$@")
+    # STATE is interpolated into generated shell below; %q it like the argv, so a state dir
+    # holding a quote or a dollar neither breaks the runner nor expands inside it (L7).
+    state_q=$(printf '%q' "$STATE")
     # CHECKED write. tsk sets no `-e`, so an unchecked cat discarded its status: a short
     # write (ENOSPC, quota) left a TRUNCATED script that chmod and the checked rename below
     # then installed without complaint, systemd-run executed it, and `run` reported success
@@ -140,12 +143,12 @@ case "${1:-}" in
     # a runner is two steps; hardening only the rename left the write beside it open.
     cat > "$tmp" <<EOF || install_failed "$name" "could not write runner script (nothing was started)"
 #!/usr/bin/env bash
-exec > "$STATE/$name.log" 2>&1
+exec > $state_q/$name.log 2>&1
 echo "[tsk] start \$(date -Is)"
 ( $argv_q )
 rc=\$?
-echo "\$rc" > "$STATE/$name.rc"
-touch "$STATE/$name.done"
+echo "\$rc" > $state_q/$name.rc
+touch $state_q/$name.done
 echo "[tsk] exit rc=\$rc \$(date -Is)"
 exit \$rc
 EOF

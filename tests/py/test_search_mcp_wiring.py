@@ -91,7 +91,11 @@ class TestQqSearchMcpP8Wiring(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             proj = os.path.join(home, "work", "repo")
             pstore = os.path.join(proj, ".quintessence")
-            os.makedirs(pstore, exist_ok=True)
+            os.makedirs(os.path.join(pstore, ".git", "hooks"), exist_ok=True)
+            # discovery accepts only a store carrying the init scaffold (posture review M5)
+            from quintessence.admin import _PRE_COMMIT_HOOK
+            with open(os.path.join(pstore, ".git", "hooks", "pre-commit"), "w") as fh:
+                fh.write(_PRE_COMMIT_HOOK)
             with open(os.path.join(pstore, "ptopic.md"), "w") as f:
                 f.write("# ptopic\ncontent\n")
             env = {
