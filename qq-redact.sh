@@ -27,8 +27,8 @@
 #   QQ_SAFE_MODEL_PREFIX  the ungated model id prefix (default claude-opus-)
 
 # Make the documented "dotenv or environment; env wins" contract TRUE even when a caller sources
-# this file WITHOUT qq-config.sh first (e.g. a standalone harness hook like meta-harness's
-# local-time-and-closure.sh). Idempotent and env-wins (_qq_load_config never overwrites a set
+# this file WITHOUT qq-config.sh first (e.g. a standalone harness-side hook that
+# sources only this file). Idempotent and env-wins (_qq_load_config never overwrites a set
 # var), so the engine's own hooks — which source qq-config.sh before this file — are unaffected.
 # Regression this closes: P6 genericized the in-script QQ_WRITE_TRUSTED_MODEL default to EMPTY and
 # moved the deployment value into the config file; an env-only read here silently disabled the
