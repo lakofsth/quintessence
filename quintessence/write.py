@@ -386,11 +386,36 @@ def _normalize_target(store: Store, target: str) -> str:
         rel = target + ".md"    # bare topic (INCLUDING a dotted name like 'v1.2-plan') -> <topic>.md
     if "/../" in f"/{rel}/":
         raise WriteError("qq-write: path may not traverse (..)", 2)
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in rel):
+        raise WriteError(f"qq-write: {rel!r} contains a control character", 2)
     if rel.startswith("-"):
         raise WriteError(
             f"qq-write: {rel!r} looks like a command-line flag, not a topic"
             " — qq verbs take no flag in the topic position (see `qq help`)", 2)
     return rel
+
+
+def _refuse_outside_after_resolving(store: Store, abs_path, rel: str) -> None:
+    """The write lands inside the store once symlinks are followed, and never THROUGH a
+    symlink. `_normalize_target` is lexical: `qq update X.md` with `X.md -> ~/.bashrc` passed
+    every guard and inserted an update-line into the shell rc, with nothing in git to show for
+    it (posture review 2026-10-08, M4). Runs under the write lock, right before the file I/O,
+    so what it checks is what is written. INVARIANTS.md:
+    a-write-lands-inside-the-store-after-resolving."""
+    qreal = store.qdir.resolve()
+
+    def _inside(p) -> bool:
+        try:
+            p.resolve().relative_to(qreal)
+            return True
+        except (ValueError, OSError):
+            return False
+
+    if abs_path.is_symlink():
+        raise WriteError(f"qq-write: {rel} is a symlink – a HEAD is written in place, never "
+                         f"through a link", 2)
+    if not _inside(abs_path.parent) or not _inside(abs_path):
+        raise WriteError(f"qq-write: {rel} resolves outside {store.qdir}", 2)
 
 
 def _first_line_keepable_stamp(first: str) -> bool:
@@ -797,6 +822,7 @@ def _execute_write(store: Store, target: str, content: str, *, msg: Optional[str
         if base is not None:
             _check_base(store, base, before, rel, topic_hint)
 
+        _refuse_outside_after_resolving(store, abs_path, rel)
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         orig_text = (abs_path.read_text(encoding="utf-8", errors="replace")
                      if abs_path.is_file() else None)

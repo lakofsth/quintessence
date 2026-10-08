@@ -293,7 +293,7 @@ class TestNumGpuHook(unittest.TestCase):
                 captured["body"] = json.loads(req.data.decode())
                 return self._FakeResponse(json.dumps({"embedding": [1.0, 2.0]}).encode())
 
-            with unittest.mock.patch.object(searchmod.urllib.request, "urlopen", fake_urlopen):
+            with unittest.mock.patch.object(searchmod.httpdirect, "urlopen", fake_urlopen):
                 idx._embed_call("hello", "")
             self.assertEqual(captured["body"]["options"], {"num_ctx": 2048})
 
@@ -306,7 +306,7 @@ class TestNumGpuHook(unittest.TestCase):
                 captured["body"] = json.loads(req.data.decode())
                 return self._FakeResponse(json.dumps({"embedding": [1.0, 2.0]}).encode())
 
-            with unittest.mock.patch.object(searchmod.urllib.request, "urlopen", fake_urlopen):
+            with unittest.mock.patch.object(searchmod.httpdirect, "urlopen", fake_urlopen):
                 idx._embed_call("hello", "")
             self.assertEqual(captured["body"]["options"], {"num_ctx": 2048, "num_gpu": 7})
 

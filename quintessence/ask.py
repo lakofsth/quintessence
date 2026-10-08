@@ -49,6 +49,7 @@ from . import heads
 from .config import Config
 from .refsview import RefsView
 from .search import SearchIndex
+from . import httpdirect
 
 HOME = os.path.expanduser("~")
 
@@ -114,7 +115,7 @@ class Ask:
 
     def probe_endpoint(self, endpoint: str) -> bool:
         try:
-            with urllib.request.urlopen(f"{endpoint}/health", timeout=ENDPOINT_TIMEOUT) as r:
+            with httpdirect.urlopen(f"{endpoint}/health", timeout=ENDPOINT_TIMEOUT) as r:
                 return 200 <= r.status < 300
         except Exception:
             return False
@@ -260,7 +261,7 @@ class Ask:
             f"{endpoint}/v1/chat/completions",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=COMPLETION_TIMEOUT) as r:
+        with httpdirect.urlopen(req, timeout=COMPLETION_TIMEOUT) as r:
             data = json.load(r)
         return self._answer_text(data["choices"][0]["message"])
 

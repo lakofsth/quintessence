@@ -81,8 +81,46 @@ def _quintessence_dir_is_env_pinned(config: Config) -> bool:
     return config.raw_source("QUINTESSENCE_DIR") in ("override", "env")
 
 
+def store_is_scaffolded(store_dir: str) -> bool:
+    """Does `store_dir` carry what `qq init --project` leaves behind — a `.git` DIRECTORY whose
+    pre-commit hook is the write-lock backstop (its `QQ_WRITE_TXN` marker), and a git config that
+    names no `hooksPath` or `fsmonitor`? A `.quintessence/` that arrived inside a cloned
+    repository has no `.git` (nested repositories do not clone); one unpacked from an archive
+    could carry a `.git` whose config runs a program on the first `git status` the Stop hook
+    issues. Neither is a store this operator made (posture review 2026-10-08, M5)."""
+    git = os.path.join(store_dir, ".git")
+    if not os.path.isdir(git) or os.path.islink(git):
+        return False
+    try:
+        with open(os.path.join(git, "hooks", "pre-commit"), encoding="utf-8", errors="replace") as fh:
+            if "QQ_WRITE_TXN" not in fh.read():
+                return False
+    except OSError:
+        return False
+    cfg = os.path.join(git, "config")
+    if os.path.exists(cfg):
+        try:
+            with open(cfg, encoding="utf-8", errors="replace") as fh:
+                text = fh.read().lower()
+        except OSError:
+            return False
+        if "hookspath" in text or "fsmonitor" in text:
+            return False
+    return True
+
+
+def _trusted_roots(config: Optional[Config]) -> Optional[set]:
+    """QQ_PROJECT_STORES as a set of real paths, or None when unset (no further restriction)."""
+    if config is None:
+        return None
+    roots = config.get("QQ_PROJECT_STORES")
+    if not roots:
+        return None
+    return {os.path.realpath(r) for r in roots}
+
+
 def _find_project_store(cwd: str, env: Mapping[str, str], home: str,
-                        user_qdir: str) -> Optional[str]:
+                        user_qdir: str, trusted: Optional[set] = None) -> Optional[str]:
     """Locate a project store, or None. Precedence:
       1. $CLAUDE_PROJECT_DIR/.quintessence if CLAUDE_PROJECT_DIR is set AND that dir exists.
       2. else walk UP from cwd looking for a `.quintessence/` directory, stopping BELOW `home`
@@ -104,6 +142,10 @@ def _find_project_store(cwd: str, env: Mapping[str, str], home: str,
             return None
         if os.path.realpath(os.path.dirname(candidate)) == home_real:
             return None       # project root == $HOME: the home level is the user layer
+        if not store_is_scaffolded(candidate):
+            return None       # a bare directory is not a store this operator made
+        if trusted is not None and os.path.realpath(os.path.dirname(candidate)) not in trusted:
+            return None       # an allowlist is in force and this root is not on it
         return candidate
 
     cpd = env.get("CLAUDE_PROJECT_DIR")
@@ -152,7 +194,7 @@ def resolve_store_path(cwd: Optional[str] = None,
         return StorePath([StoreLocation(user_qdir, "explicit")], explicit=True)
 
     locations: List[StoreLocation] = []
-    project = _find_project_store(cwd, env, home, user_qdir)
+    project = _find_project_store(cwd, env, home, user_qdir, _trusted_roots(config))
     if project is not None:
         locations.append(StoreLocation(project, "project"))
     locations.append(StoreLocation(user_qdir, "user"))

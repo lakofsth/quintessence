@@ -30,7 +30,22 @@ $CLAUDE_CODE_SESSION_ID (present in the environment of every command a Claude Co
 runs) as ~/.claude/projects/*/<session-id>.jsonl. No transcript resolvable -> model unknown
 -> not trusted. This is NOT an adversarial control: like the read-side redaction it is a
 structural guard against a well-meaning non-trusted model authoring security topics, not a
-sandbox — a caller who can run `qq` can also edit the queue file. Timing: the update verb's pre-lock existence check (_gate_target_exists) is
+sandbox — a caller who can run `qq` can also edit the queue file.
+
+POLICY KEYS ARE ENV-BLIND ON THE WRITE AXIS (posture review 2026-10-08, M3): for a write-trust
+decision (gate_reason) QQ_AUTHOR_GATE, QQ_AUTHOR_GATE_SLUGS, QQ_SAFE_MODEL_PREFIX,
+QQ_WRITE_TRUSTED_MODEL and QQ_MODEL_TRANSCRIPT resolve through Config.get_noenv — constructor
+overrides, the config file, the registry default — never the environment, because the session
+being judged owns its environment and `QQ_AUTHOR_GATE=0 qq update …` switched the gate off.
+The READ gate (`qq show`/`brief` withholding, via model_mode with trusted=False) keeps the
+ordinary resolution: it protects the reader from itself and has nothing to defend against. `qq config set` changes these keys only from a terminal
+(admin.GATE_KEYS). What remains, stated rather than hidden: the gate is structural, not
+adversarial. A session with a shell can still edit the config file, point QQ_CONFIG at another
+file (that key is env-selected by design), or edit the queue. CLAUDE_CODE_SESSION_ID is env by
+nature; a session that knows another session's id can borrow its transcript.
+INVARIANTS.md: the-authoring-gate-reads-its-policy-from-the-file.
+
+Timing: the update verb's pre-lock existence check (_gate_target_exists) is
 re-evaluated under the engine write-lock (quintessence.write._execute_write's gate_check
 callback), so a concurrent create of the same protected topic between the pre-lock check
 and the lock cannot let an untrusted update land — the under-lock re-check diverts it to
@@ -76,11 +91,19 @@ SECTION = "PROPOSED-WRITES"
 _PROJECTS_GLOB = os.path.join("~", ".claude", "projects", "*", "{sid}.jsonl")
 
 
-def transcript_path(config) -> Optional[str]:
+def _policy(config, name: str, trusted: bool):
+    """The one place the two axes differ: a WRITE-trust decision (trusted=True) reads the key
+    env-blind, because the session being judged owns its environment; the READ gate
+    (qq show/brief withholding, protecting the reader) keeps the ordinary resolution, and the
+    env is also the test seam there."""
+    return config.get_noenv(name) if trusted else config.get(name)
+
+
+def transcript_path(config, *, trusted: bool = False) -> Optional[str]:
     """The transcript to probe for model identity: QQ_MODEL_TRANSCRIPT when set, else the
     $CLAUDE_CODE_SESSION_ID-derived path under ~/.claude/projects (newest mtime wins if the
     same id somehow matches under several project dirs). None = no signal (-> unknown)."""
-    override = config.get_path("QQ_MODEL_TRANSCRIPT")
+    override = _policy(config, "QQ_MODEL_TRANSCRIPT", trusted)
     if override:
         return override
     sid = config.resolve_raw("CLAUDE_CODE_SESSION_ID")
@@ -95,7 +118,7 @@ def transcript_path(config) -> Optional[str]:
         return hits[0]
 
 
-def model_identity(config) -> str:
+def model_identity(config, *, trusted: bool = False) -> str:
     """Last-known model id from the session transcript, '' when there is no readable signal.
     Bottom-up, newest entry wins. Never raises — any failure is '' (fail safe).
 
@@ -114,7 +137,7 @@ def model_identity(config) -> str:
     The raw-scan fallback is deliberately absent: on a trust decision, an unparseable transcript
     must read as '' (unknown, untrusted), never as a guess."""
     try:
-        tp = transcript_path(config)
+        tp = transcript_path(config, trusted=trusted)
         if not tp or not os.path.isfile(tp):
             return ""
         with open(tp, encoding="utf-8", errors="replace") as fh:
@@ -137,7 +160,7 @@ def model_identity(config) -> str:
         return ""
 
 
-def model_mode(config, model: Optional[str] = None) -> str:
+def model_mode(config, model: Optional[str] = None, *, trusted: bool = False) -> str:
     """'fable' | 'opus' | 'unknown' — exact port of qq-redact.sh's qq_model_mode CLASSIFY step
     (the read half lives in model_identity): empty model -> unknown (never a spurious 'fable'
     on a gate-off install, ade82f8); exact QQ_WRITE_TRUSTED_MODEL match -> 'fable';
@@ -146,9 +169,9 @@ def model_mode(config, model: Optional[str] = None) -> str:
     same), with the c55af14 belt-and-braces guard kept behind it: empty must never categorize as
     'opus'."""
     if model is None:
-        model = model_identity(config)
-    gated = config.get_str("QQ_WRITE_TRUSTED_MODEL")
-    safe = config.get_str("QQ_SAFE_MODEL_PREFIX") or "claude-opus-"
+        model = model_identity(config, trusted=trusted)
+    gated = str(_policy(config, "QQ_WRITE_TRUSTED_MODEL", trusted))
+    safe = str(_policy(config, "QQ_SAFE_MODEL_PREFIX", trusted)) or "claude-opus-"
     if not model:
         return "unknown"
     if gated and model == gated:
@@ -189,13 +212,13 @@ def gate_reason(config, topic: str) -> Optional[str]:
     is the untrusted model's identity ('unknown' when empty) for the queue record/notice.
     Pure reads, ordered so a non-gated call does no transcript I/O: enabled? -> slug list
     non-empty? -> slug match? -> only THEN model detection."""
-    if not config.get_bool("QQ_AUTHOR_GATE"):
+    if not config.get_noenv("QQ_AUTHOR_GATE"):
         return None
-    entries = config.get_list("QQ_AUTHOR_GATE_SLUGS")
+    entries = config.get_noenv("QQ_AUTHOR_GATE_SLUGS")
     if not entries or not slug_gated(topic, entries):
         return None
-    model = model_identity(config)
-    if model_mode(config, model) in ("opus", "fable"):
+    model = model_identity(config, trusted=True)
+    if model_mode(config, model, trusted=True) in ("opus", "fable"):
         return None
     return model or "unknown"
 

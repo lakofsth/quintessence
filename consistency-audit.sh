@@ -40,9 +40,27 @@ force=0; [ "${1:-}" = "--force" ] && force=1
 # clears them on the next fire. Fail-soft: a probe failure never blocks the audit.
 python3 "$ENGINE/proc-probe.py" --write >> "$LOG" 2>&1 || log "proc-probe: rc=$? (fail-soft, audit continues)"
 
+# The baseline is DATA, read as key=value — never sourced. It is same-user state, but a file
+# executed as shell is the pattern the rest of this tree refuses (qq-config.sh parses its
+# dotenv for the same reason). Only the two keys the audit writes are read; anything else in
+# the file is ignored.
+audit_read_baseline() {
+  local line key val
+  ts=0; qqhead=""
+  [ -f "$BASELINE" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    case "$key" in
+      ts)     case "$val" in ''|*[!0-9]*) ;; *) ts="$val" ;; esac ;;
+      qqhead) case "$val" in ''|*[!0-9a-fA-F]*) ;; *) qqhead="$val" ;; esac ;;
+    esac
+  done < "$BASELINE"
+  return 0
+}
+
 now=$(date +%s)
-ts=0; qqhead=""
-[ -f "$BASELINE" ] && . "$BASELINE" 2>/dev/null
+audit_read_baseline
 last_ts="${ts:-0}"; last_head="${qqhead:-}"
 days_since=$(( (now - last_ts) / 86400 ))
 
@@ -74,11 +92,16 @@ fi
 # run the LLM audit (it writes $TMPF as its completion signal)
 rm -f "$TMPF"
 echo "audit: running — $reason (model=$MODEL)"; log "running audit: $reason"
-# Claude-tool layer (defense-in-depth atop the systemd ReadOnlyPaths/NoNewPrivileges floor): a
-# deny-by-default allowlist instead of skip-permissions — the flag-only audit needs only read +
-# qq (Bash) + write-its-findings. NEEDS FORCED-TEST: if the audit can't complete, widen the
-# allowlist or revert (engine is git-tracked).
-timeout 600 "$CLAUDE" --allowedTools "Read,Grep,Glob,Bash,Write" --model "$MODEL" -p "$(cat "$RUNBOOK")" >> "$LOG" 2>&1 \
+# Claude-tool layer: an allowlist SCOPED to what the runbook asks of the agent — read anything,
+# run the four qq read verbs, and edit the one findings file. The agent reads HEADs and memory
+# facts any session can write, so a bare `Bash`/`Write` grant was the blast radius of a planted
+# instruction (posture review 2026-10-08, H2). `Edit(path)` is the rule shape Claude Code matches
+# for file writes (a `Write(path)` rule is inert). No systemd unit ships with this tree; if you
+# run it from one, add ReadOnlyPaths=/NoNewPrivileges= there — this allowlist is the only floor
+# the tree itself provides. If the audit cannot complete, widen the allowlist here deliberately
+# and say why. INVARIANTS.md: the-unattended-audit-holds-only-the-tools-its-runbook-names.
+AUDIT_TOOLS="Read,Grep,Glob,Bash(qq check:*),Bash(qq menu),Bash(qq show:*),Bash(qq brief:*),Bash(qq fact:*),Bash(qq findings:*),Edit($TMPF)"
+timeout 600 "$CLAUDE" --allowedTools "$AUDIT_TOOLS" --model "$MODEL" -p "$(cat "$RUNBOOK")" >> "$LOG" 2>&1 \
   || log "claude exited non-zero (rc=$?)"
 
 if [ -f "$TMPF" ]; then

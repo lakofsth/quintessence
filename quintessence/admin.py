@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from typing import Optional
 
 from .atomicio import atomic_write_text
@@ -236,9 +237,21 @@ def config_get(config: Config, key: str) -> Optional[str]:
     return None
 
 
+# A config key as the dotenv grammar and qq-config.sh's export filter both read it: an upper-case
+# identifier. The same shape qq-config.sh's `case "$key"` accepts, narrowed to upper case.
+_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+# The authoring gate's own policy keys. They are read from the config file alone (authgate reads
+# them env-blind), so the file is the one place a session could still turn the gate off — and a
+# session holding only a Bash tool has no terminal. INVARIANTS.md:
+# the-authoring-gate-reads-its-policy-from-the-file.
+GATE_KEYS = frozenset({"QQ_AUTHOR_GATE", "QQ_AUTHOR_GATE_SLUGS", "QQ_SAFE_MODEL_PREFIX",
+                       "QQ_WRITE_TRUSTED_MODEL", "QQ_MODEL_TRANSCRIPT"})
+
+
 def config_set(config: Config, key: str, value: str, *,
                allow_relocate: bool = False, force: bool = False,
-               env: Optional[dict] = None) -> tuple[str, list[str]]:
+               env: Optional[dict] = None, interactive: Optional[bool] = None) -> tuple[str, list[str]]:
     """`qq config set <KEY> <VALUE>` — rewrite-or-append the dotenv file, guarded. Returns
     (success_message, warnings); refusals raise AdminError(2). Guard order matches bash
     (QQ_SANDBOX, then the relocate keys), with D3's validate_set appended as the third gate:
@@ -252,6 +265,21 @@ def config_set(config: Config, key: str, value: str, *,
          config-leak incident was agent-made, and A2 says never print the skeleton key)."""
     environ = os.environ if env is None else env
     f = config.config_path
+    # One call changes one line (posture review 2026-10-08, M2): a value carrying a newline
+    # appended further `KEY=VALUE` lines — reproduced setting QUINTESSENCE_DIR past the
+    # relocation guard below — and a key outside the dotenv grammar was written and then skipped
+    # by every reader. INVARIANTS.md: config-set-writes-one-line-of-one-registered-shape.
+    if not _KEY_RE.fullmatch(key or ""):
+        raise AdminError(f"qq config set: {key!r} is not a config key (want an upper-case "
+                         f"identifier such as QQ_DIGEST_PIN)", 2)
+    if "\n" in value or "\r" in value:
+        raise AdminError(f"qq config set: the value for {key} contains a line break – a config "
+                         f"value is one line", 2)
+    if key in GATE_KEYS:
+        tty = sys.stdin.isatty() if interactive is None else interactive
+        if not tty:
+            raise AdminError(f"qq config set: {key} is an authoring-gate policy key and is set "
+                             f"only from an interactive terminal (or by editing {f} by hand)", 2)
     if environ.get("QQ_SANDBOX"):
         raise AdminError(
             f"qq config set: refused – QQ_SANDBOX is set, so this context must not mutate the "
@@ -362,8 +390,23 @@ def _install_store_scaffold(d: str) -> None:
         if r.returncode != 0:
             raise AdminError(f"qq init: git init failed in {d}", 1)
     hd = os.path.join(d, ".git", "hooks")
+    os.makedirs(hd, exist_ok=True)
     for name, body in (("pre-commit", _PRE_COMMIT_HOOK), ("pre-push", _PRE_PUSH_HOOK)):
         hp = os.path.join(hd, name)
+        # Overwrite only an empty slot or an earlier copy of our own hook (the QQ_WRITE_TXN
+        # marker names it). A foreign hook is the operator's, and silently replacing it dropped
+        # whatever it enforced (posture review 2026-10-08, L6). INVARIANTS.md:
+        # scaffold-never-replaces-a-foreign-hook.
+        if os.path.exists(hp):
+            try:
+                with open(hp, encoding="utf-8", errors="replace") as fh:
+                    existing = fh.read()
+            except OSError:
+                existing = ""
+            if "QQ_WRITE_TXN" not in existing:
+                raise AdminError(
+                    f"qq init: {hp} already holds a hook that is not quintessence's – move it "
+                    f"aside (or chain it) before initialising this store", 1)
         with open(hp, "w", encoding="utf-8") as fh:
             fh.write(body)
         os.chmod(hp, 0o755)

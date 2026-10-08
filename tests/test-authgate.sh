@@ -46,12 +46,15 @@ OPUS_TP="$TMP/opus.jsonl";   printf '{"type":"assistant","message":{"model":"cla
 SONNET_TP="$TMP/sonnet.jsonl"; printf '{"type":"assistant","message":{"model":"claude-sonnet-4-5"}}\n' > "$SONNET_TP"
 FABLE_TP="$TMP/fable.jsonl"; printf '{"type":"assistant","message":{"model":"acme-gated-5"}}\n'  > "$FABLE_TP"
 
-GATE_ENV=(QQ_AUTHOR_GATE_SLUGS='sec-*' QQ_WRITE_TRUSTED_MODEL='acme-gated-5')
+# The gate's policy keys are ENV-BLIND since the 2026-10-08 posture review (M3: an env prefix on
+# the gated verb switched the gate off), so the fixture writes them into the config file and
+# `gate_cfg <transcript> [extra KEY=VALUE…]` rewrites that file before each run.
+gate_cfg(){ { printf 'QQ_AUTHOR_GATE_SLUGS=sec-*\nQQ_WRITE_TRUSTED_MODEL=acme-gated-5\nQQ_MODEL_TRANSCRIPT=%s\n' "$1"; shift; printf '%s\n' "$@"; } > "$QQ_CONFIG"; }
 
 # ---- PARITY GATE 1: trusted model, gated slug — byte-identical to gate-at-defaults ----------------
 SA="$TMP/a/store"; mkdir -p "$TMP/a"; mkfixture "$SA"
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$OPUS_TP" "$QQ" new sec-topic "seed" >/dev/null 2>&1
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$OPUS_TP" "$QQ" update sec-topic "a trusted line" >"$TMP/a.out" 2>"$TMP/a.err"
+gate_cfg "$OPUS_TP"; "$QQ" new sec-topic "seed" >/dev/null 2>&1
+gate_cfg "$OPUS_TP"; "$QQ" update sec-topic "a trusted line" >"$TMP/a.out" 2>"$TMP/a.err"
 rc_a=$?
 
 SB="$TMP/b/store"; mkdir -p "$TMP/b"; mkfixture "$SB"
@@ -68,8 +71,8 @@ diff -q <(normalize <"$SA/sec-topic.md") <(normalize <"$SB/sec-topic.md") >/dev/
 
 # ---- PARITY GATE 2: UNTRUSTED model, NON-gated slug — byte-identical too --------------------------
 export QUINTESSENCE_DIR="$SA" QQ_CONFIG="$SA.config" QQ_STATE_DIR="$SA.state" QQ_MEMDIR="$SA.mem"
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" new roadmap "plain topic" >/dev/null 2>&1
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" update roadmap "an untrusted line on a plain topic" >"$TMP/c.out" 2>"$TMP/c.err"
+gate_cfg "$SONNET_TP"; "$QQ" new roadmap "plain topic" >/dev/null 2>&1
+gate_cfg "$SONNET_TP"; "$QQ" update roadmap "an untrusted line on a plain topic" >"$TMP/c.out" 2>"$TMP/c.err"
 rc_c=$?
 export QUINTESSENCE_DIR="$SB" QQ_CONFIG="$SB.config" QQ_STATE_DIR="$SB.state" QQ_MEMDIR="$SB.mem"
 "$QQ" new roadmap "plain topic" >/dev/null 2>&1
@@ -86,7 +89,7 @@ rc_d=$?
 export QUINTESSENCE_DIR="$SA" QQ_CONFIG="$SA.config" QQ_STATE_DIR="$SA.state" QQ_MEMDIR="$SA.mem"
 head_before="$(cat "$SA/sec-topic.md")"
 rev_before="$(git -C "$SA" rev-parse HEAD)"
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" update sec-topic "an untrusted security claim" >"$TMP/e.out" 2>"$TMP/e.err"
+gate_cfg "$SONNET_TP"; "$QQ" update sec-topic "an untrusted security claim" >"$TMP/e.out" 2>"$TMP/e.err"
 rc=$?
 [ "$rc" -eq 0 ] && ok "divert: exit 0 (caller must not read it as failure)" || no "divert: exit $rc"
 [ ! -s "$TMP/e.out" ] && ok "divert: stdout empty" || { no "divert: stdout not empty"; sed 's/^/       /' "$TMP/e.out"; }
@@ -102,13 +105,13 @@ grep -qF '"> updated: ' "$PF" && grep -qF 'an untrusted security claim' "$PF" \
   && ok "divert: verbatim (stamped) proposed text recorded" || no "divert: verbatim text missing"
 
 # unknown model (no resolvable transcript) fails safe to divert
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$TMP/nonexistent.jsonl" "$QQ" update sec-topic "an unknown-model claim" >"$TMP/f.out" 2>"$TMP/f.err"
+gate_cfg "$TMP/nonexistent.jsonl"; "$QQ" update sec-topic "an unknown-model claim" >"$TMP/f.out" 2>"$TMP/f.err"
 [ $? -eq 0 ] && [ ! -s "$TMP/f.out" ] && grep -q "model (unknown)" "$TMP/f.err" \
   && [ "$(git -C "$SA" rev-parse HEAD)" = "$rev_before" ] \
   && ok "divert: unknown/undetectable model fails safe to PROPOSED" || no "divert: unknown model not diverted"
 
 # fable (the configured limited reader) is a trusted AUTHOR on the write axis
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$FABLE_TP" "$QQ" update sec-topic "a fable-authored line" >"$TMP/g.out" 2>"$TMP/g.err"
+gate_cfg "$FABLE_TP"; "$QQ" update sec-topic "a fable-authored line" >"$TMP/g.out" 2>"$TMP/g.err"
 [ $? -eq 0 ] && grep -q "committed + mirrored" "$TMP/g.out" && [ ! -s "$TMP/g.err" ] \
   && grep -q "a fable-authored line" "$SA/sec-topic.md" \
   && ok "trusted: QQ_WRITE_TRUSTED_MODEL match authors directly (write axis != read axis)" \
@@ -116,39 +119,48 @@ env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$FABLE_TP" "$QQ" update sec-topic "a f
 
 # rewrite + essence + new divert shapes
 rev_before="$(git -C "$SA" rev-parse HEAD)"
+gate_cfg "$SONNET_TP"
 printf '# Quintessence — sec-topic\n> updated: x\n> essence: clobbered\n\n## Notes\n' \
-  | env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" rewrite sec-topic >"$TMP/h.out" 2>"$TMP/h.err"
+  | "$QQ" rewrite sec-topic >"$TMP/h.out" 2>"$TMP/h.err"
 [ $? -eq 0 ] && [ ! -s "$TMP/h.out" ] && grep -q "AUTHORING GATE" "$TMP/h.err" \
   && grep -q 'via `qq rewrite sec-topic`' "$PF" && ! grep -q "clobbered" "$SA/sec-topic.md" \
   && ok "divert: rewrite queues the whole proposed file, HEAD untouched" || no "divert: rewrite shape wrong"
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" essence sec-topic "a proposed essence" >/dev/null 2>"$TMP/i.err"
+gate_cfg "$SONNET_TP"; "$QQ" essence sec-topic "a proposed essence" >/dev/null 2>"$TMP/i.err"
 [ $? -eq 0 ] && grep -q 'via `qq essence sec-topic`' "$PF" && ! grep -q "a proposed essence" "$SA/sec-topic.md" \
   && ok "divert: essence queues, HEAD untouched" || no "divert: essence shape wrong"
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" new sec-fresh "a proposed new thread" >/dev/null 2>"$TMP/j.err"
+gate_cfg "$SONNET_TP"; "$QQ" new sec-fresh "a proposed new thread" >/dev/null 2>"$TMP/j.err"
 [ $? -eq 0 ] && [ ! -f "$SA/sec-fresh.md" ] && grep -q 'via `qq new sec-fresh`' "$PF" \
   && ok "divert: new queues the essence arg, no HEAD created" || no "divert: new shape wrong"
 [ "$(git -C "$SA" rev-parse HEAD)" = "$rev_before" ] && ok "divert: still no commits after all shapes" || no "divert: a commit leaked"
 
 # gated-slug REFUSALS stay refusals (never converted to a queued 'success') —
 # the under-lock gate re-check also sees the target absent and does not divert
-env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" update sec-missing "text" >/dev/null 2>"$TMP/k.err"
+gate_cfg "$SONNET_TP"; "$QQ" update sec-missing "text" >/dev/null 2>"$TMP/k.err"
 rc=$?
 [ "$rc" -ne 0 ] && grep -q "needs an existing" "$TMP/k.err" && ! grep -q "sec-missing" "$PF" \
   && ok "refusal-parity: update to a missing gated HEAD still errors after under-lock re-check, nothing queued" \
   || no "refusal-parity: missing-HEAD update mishandled (rc=$rc)"
 
 # ---- ESCAPE HATCH: QQ_AUTHOR_GATE=0 ---------------------------------------------------------------
-env QQ_AUTHOR_GATE=0 "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$SONNET_TP" "$QQ" update sec-topic "gate disabled line" >"$TMP/l.out" 2>"$TMP/l.err"
+gate_cfg "$SONNET_TP" QQ_AUTHOR_GATE=0; "$QQ" update sec-topic "gate disabled line" >"$TMP/l.out" 2>"$TMP/l.err"
 [ $? -eq 0 ] && grep -q "committed + mirrored" "$TMP/l.out" && [ ! -s "$TMP/l.err" ] \
   && grep -q "gate disabled line" "$SA/sec-topic.md" \
   && ok "escape hatch: QQ_AUTHOR_GATE=0 restores direct authoring" || no "escape hatch: gate still active"
+
+# ---- ENV-BLIND: the same keys in the ENVIRONMENT change nothing (posture review M3) ---------------
+gate_cfg "$SONNET_TP"
+env QQ_AUTHOR_GATE=0 QQ_MODEL_TRANSCRIPT="$OPUS_TP" QQ_AUTHOR_GATE_SLUGS= QQ_SAFE_MODEL_PREFIX=claude-sonnet- \
+  "$QQ" update sec-topic "an env-prefixed untrusted claim" >"$TMP/n.out" 2>"$TMP/n.err"
+grep -q 'AUTHORING GATE' "$TMP/n.err" && ! grep -q 'env-prefixed untrusted claim' "$SA/sec-topic.md" \
+  && ok "env-blind: QQ_AUTHOR_GATE=0 / a borrowed transcript / an emptied slug list in the env do not reach the gate" \
+  || no "env-blind: an env prefix changed the gate's decision"
 
 # ---- RATIFICATION (the documented manual flow) -----------------------------------------------------
 # a trusted session lists the queue, JSON-decodes the text, replays it through the same verb,
 # then deletes the line from pending-findings (state dir — direct edit is sanctioned there).
 line="$(grep -m1 'an untrusted security claim' "$PF")"
 text="$(printf '%s' "$line" | sed 's/.*; text: //' | python3 -c 'import json,sys; sys.stdout.write(json.loads(sys.stdin.read()))')"
-printf '%s' "$text" | env "${GATE_ENV[@]}" QQ_MODEL_TRANSCRIPT="$OPUS_TP" "$QQ" update sec-topic >"$TMP/m.out" 2>"$TMP/m.err"
+gate_cfg "$OPUS_TP"; printf '%s' "$text" | "$QQ" update sec-topic >"$TMP/m.out" 2>"$TMP/m.err"
 [ $? -eq 0 ] && grep -q "an untrusted security claim" "$SA/sec-topic.md" \
   && ok "ratify: trusted replay of the JSON-decoded text lands verbatim" || no "ratify: replay failed"
 grep -vF -- "$line" "$PF" > "$PF.tmp" && mv "$PF.tmp" "$PF"

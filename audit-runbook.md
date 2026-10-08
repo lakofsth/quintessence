@@ -54,6 +54,7 @@ path, which sits under the runtime state dir rather than the engine dir; the run
 Examples:
     - [T2 contradiction] memory/foo.md says X but HEAD bar says Y – which is current?
     - [T3 reality] memory/baz.md claims primary disk /dev/sda, but snapshot shows only /dev/nvme0n1
-Cap at the ~10 most important. If you find NOTHING worth a person's attention, write the file EMPTY:
-    : > "${QQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/quintessence}/.audit-findings.tmp"
-Writing this file is how the runner knows you finished – ALWAYS write it, even when empty.
+Cap at the ~10 most important. If you find NOTHING worth a person's attention, write the file EMPTY.
+Write it with your file-editing tool (Write/Edit), not a shell redirect: the runner grants you
+`qq check/menu/show/brief/fact/findings` in the shell and an edit of exactly this file, nothing
+else. Writing this file is how the runner knows you finished – ALWAYS write it, even when empty.

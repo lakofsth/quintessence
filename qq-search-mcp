@@ -47,6 +47,7 @@ from quintessence.ask import Ask, render, RETRIEVAL_DEGRADED_WARNING  # noqa: E4
 from quintessence.refsview import search_hit_annotations  # noqa: E402
 from quintessence.storepath import resolve_store_path  # noqa: E402
 from quintessence.searchcompose import build_indexes, ComposedSearchIndex  # noqa: E402
+from quintessence.mcpedge import check_passthrough  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 mcp = FastMCP("quintessence")
@@ -61,13 +62,16 @@ _QQ_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), "qq")
 def _run_qq(args: list[str]) -> str:
     """Run `qq <args>` (no shell — args passed as a list, so no injection) and return combined
     stdout+stderr. Inherits this server's cwd/env, so the store resolves the same way the CLI
-    does for the user's own shell."""
+    does for the user's own shell. stdin is /dev/null: this process's stdin IS the JSON-RPC
+    transport, and a verb that falls through to its stdin read (`rewrite`, an `update` with no
+    text) ate protocol frames for up to the timeout (posture review 2026-10-08, M8)."""
     try:
         p = subprocess.run(
             [_QQ_BIN, *args],
             capture_output=True,
             text=True,
             timeout=120,
+            stdin=subprocess.DEVNULL,
         )
     except Exception as e:  # noqa: BLE001
         return f"[qq error] failed to run `qq {' '.join(args)}`: {e}"
@@ -200,7 +204,9 @@ def update_head(topic: str, text: str) -> str:
         topic: an EXISTING HEAD/topic name.
         text: the update prose (no timestamp/marker line — the store stamps it).
     """
-    return _run_qq(["update", topic, text])
+    # `--` keeps the text literal: prose beginning with `--ref=` was consumed as a flag and an
+    # empty remainder fell through to the (now nulled) stdin read.
+    return _run_qq(["update", topic, "--", text])
 
 
 @mcp.tool()
@@ -215,6 +221,8 @@ def qq(args: list[str]) -> str:
               WHOLE new HEAD from stdin — not available here; use the CLI for rewrite)
       MAINT:  ["finalize", topic] (snapshot to journal) · ["compact", topic] · ["check"]
               ["delete", topic] (RETIRES a HEAD — destructive, recoverable via journal)
+    Not available here: config/init/reconcile (admin surface), rewrite (stdin), and a
+    `--ref probe:<cmd>` on any verb (it runs a shell command) — use the CLI in a terminal.
     For search/ask/brief/show/update, prefer the dedicated tools — they carry better hints. This
     is for the long tail. Writes go through the real lock/stamp path, so treat delete/rewrite with
     the same care you would at a shell.
@@ -223,8 +231,13 @@ def qq(args: list[str]) -> str:
         args: qq subcommand + arguments, one token per element, e.g. ["menu"] or
               ["finalize", "flowtun-stack"].
     """
-    if not args:
-        return "[qq error] no subcommand given (e.g. args=[\"menu\"])"
+    # The edge check (quintessence.mcpedge): a verb allowlist, and no `probe:` reference in flag
+    # position — `--ref probe:<cmd>` runs a shell command at write time and on every sweep, which
+    # an allowlisted MCP tool must not be a prompt-free road to. INVARIANTS.md:
+    # the-mcp-passthrough-cannot-reach-a-shell.
+    refusal = check_passthrough(list(args))
+    if refusal is not None:
+        return refusal
     return _run_qq(list(args))
 
 

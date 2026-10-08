@@ -64,6 +64,7 @@ from quintessence.ask import Ask, render  # noqa: E402
 from quintessence.refsview import search_hit_annotations  # noqa: E402
 from quintessence.storepath import resolve_store_path  # noqa: E402
 from quintessence.searchcompose import build_indexes, ComposedSearchIndex  # noqa: E402
+from quintessence.mcpedge import clamp_k, strip_name_hints  # noqa: E402
 from quintessence.remotepolicy import (  # noqa: E402
     PROFILE_STANDARD,
     PROFILE_WIDE,
@@ -191,7 +192,8 @@ def _run_qq(args: list[str]) -> str:
     face never passes a write verb, and the only caller below passes a policy-approved topic to
     the `brief` verb. Raises on failure — the caller owns auditing."""
     try:
-        p = subprocess.run([_QQ_BIN, *args], capture_output=True, text=True, timeout=120)
+        p = subprocess.run([_QQ_BIN, *args], capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
     except Exception as e:
         raise RuntimeError(str(e)) from e
     if p.returncode != 0:
@@ -246,6 +248,7 @@ def search_continuity(query: str, k: int = 6, source: str | None = None) -> str:
     t0 = time.monotonic()
     try:
         policy = RemotePolicy(_config, profile=_profile.get())
+        k = clamp_k(k)
         hits, stats = _index.search(query, k=k, source=source, with_stats=True)
         floored_count = stats["floored"]
         kept = policy.filter_hits(hits)
@@ -290,6 +293,7 @@ def ask_continuity(question: str, k: int = 12, source: str | None = None) -> str
     """
     t0 = time.monotonic()
     try:
+        k = clamp_k(k)
         result = _asker.ask(question, k=k, source=source)
         retrieval_degraded = result.get("retrieval_degraded", False)
         raw_degraded = bool(result.get("degraded"))
@@ -330,7 +334,9 @@ def resume_brief(topic: str) -> str:
         # remote access is governed by profile — lifting it here keeps
         # the remote policy as the sole authority (same as the ask path).
         out = _run_qq(["brief", "--unredacted", topic])
-        out = _sanitize_brief_for_remote(out)
+        # A near-miss topic gets "Did you mean: …" drawn from EVERY slug, withheld ones
+        # included; the deny check above ran on the requested name only (M7).
+        out = strip_name_hints(_sanitize_brief_for_remote(out))
         audit("brief", profile=_profile.get(), topic=topic, denied=0, bytes=len(out),
               ms=int((time.monotonic() - t0) * 1000))
         return _sanitize_outward(out)
@@ -400,12 +406,22 @@ def profile_for(header: str | None, tokens: dict[str, str]) -> str | None:
 
 
 def auth_wrapper(app, tokens: dict[str, str]):
-    """Pure-ASGI gate in front of the MCP app. Lifespan and any non-HTTP scope pass through
-    untouched (the inner app's session manager needs its lifespan); every HTTP request must carry
-    a recognised bearer token, and the token it carries selects the deny profile for that call."""
+    """Pure-ASGI gate in front of the MCP app. The lifespan scope passes through untouched (the
+    inner app's session manager needs it); every HTTP request must carry a recognised bearer
+    token, and the token it carries selects the deny profile for that call; any other scope type
+    is closed. INVARIANTS.md: the-remote-face-names-only-what-policy-allows."""
     async def wrapped(scope, receive, send):
-        if scope["type"] != "http":
+        kind = scope.get("type")
+        if kind == "lifespan":
             return await app(scope, receive, send)
+        if kind != "http":
+            # Only HTTP carries the bearer this gate checks. A websocket (or any future scope
+            # type) used to pass through unauthenticated, safe only because no such route
+            # existed (posture review 2026-10-08, L4). Close it; never forward it.
+            audit("reject", reason=f"non-http-scope:{kind}", path=scope.get("path", ""))
+            if kind == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         prof = profile_for(headers.get("authorization"), tokens)
         if prof is None:

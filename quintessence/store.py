@@ -41,6 +41,16 @@ class StorePathError(ValueError):
     dispatcher surfaces it as a clean exit-2 usage error."""
 
 
+
+
+def _refuse_control_chars(subject: str) -> None:
+    """A topic or fact name carries no control character: a newline in a topic split the
+    line-oriented findings file and forged a second finding, and any C0/DEL byte reaches
+    filenames, INDEX rows and the H1 scaffold (posture review 2026-10-08, L2/M9).
+    INVARIANTS.md: a-write-lands-inside-the-store-after-resolving."""
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in subject):
+        raise StorePathError(
+            f"quintessence: topic {subject!r} contains a control character")
 def _locale_sort_key(name: str) -> bytes:
     """Sort key matching bash glob order (`for f in "$QDIR"/*.md`), which is LOCALE-aware
     (LC_COLLATE), NOT plain codepoint order — caught by live-store parity testing: a real
@@ -94,11 +104,26 @@ class Store:
             raise StorePathError(
                 f"quintessence: topic {subject!r} looks like a command-line flag, not a topic"
                 " – qq verbs take no flag in the topic position (see `qq help`)")
+        _refuse_control_chars(subject)
         try:
             p.resolve().relative_to(self.qdir.resolve())
         except ValueError:
             raise StorePathError(
                 f"quintessence: topic {subject!r} may not traverse outside the store")
+        return p
+
+    def _within_memdir(self, p: Path, subject: str) -> Path:
+        """The memory-fact twin of _within_qdir: `qq fact <name>` built its path straight from
+        the argument and read any `*.md` the user could reach (posture review 2026-10-08, L1)."""
+        if subject.startswith("-"):
+            raise StorePathError(
+                f"quintessence: fact name {subject!r} looks like a command-line flag")
+        _refuse_control_chars(subject)
+        try:
+            p.resolve().relative_to(self.memdir.resolve())
+        except ValueError:
+            raise StorePathError(
+                f"quintessence: fact name {subject!r} may not traverse outside the memory store")
         return p
 
     def head_path(self, slug: str) -> Path:
@@ -148,7 +173,7 @@ class Store:
         return out
 
     def memory_path(self, slug: str) -> Path:
-        return self.memdir / f"{slug}.md"
+        return self._within_memdir(self.memdir / f"{slug}.md", slug)
 
     def read_memory(self, slug: str) -> str:
         return self.memory_path(slug).read_text(encoding="utf-8", errors="replace")
