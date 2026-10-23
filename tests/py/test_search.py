@@ -1450,5 +1450,47 @@ class TestSearchWithStats(unittest.TestCase):
                              "the first call's stats must survive a later call's overwrite")
 
 
+class TestCorpusConfigShortlabel(unittest.TestCase):
+    """The QQ_CORPUS_CONFIG `shortlabel` key (fa813c1) is read at two sites in search.py:
+    _iter_sources (the label every chunk/hit carries) and build_index's zero-chunk warning
+    (which must look the SAME label up). Both are pinned here."""
+
+    def _planted(self, base, cfg):
+        os.makedirs(os.path.join(base, "kb", "alpha"))
+        with open(os.path.join(base, "kb", "alpha", "a.md"), "w") as f:
+            f.write("# t\nshortlabelmarker body\n")
+        path = os.path.join(base, "corpus.json")
+        with open(path, "w") as f:
+            json.dump(cfg, f)
+        return path
+
+    def test_configured_shortlabel_is_rendered_on_hits(self):
+        with tempfile.TemporaryDirectory() as base:
+            cfg = self._planted(base, {"shortlabel": {"alpha": "al"}})
+            idx = make_index(base, QQ_CORPUS_CONFIG=cfg)
+            hits = idx.grep_fallback("shortlabelmarker")
+            self.assertEqual([h["source"] for h in hits], ["al"])
+
+    def test_absent_key_keeps_directory_name_and_defaults(self):
+        with tempfile.TemporaryDirectory() as base:
+            cfg = self._planted(base, {})
+            os.makedirs(os.path.join(base, "kb", "quintessence"))
+            with open(os.path.join(base, "kb", "quintessence", "q.md"), "w") as f:
+                f.write("# t\nshortlabelmarker body\n")
+            idx = make_index(base, QQ_CORPUS_CONFIG=cfg)
+            got = sorted(h["source"] for h in idx.grep_fallback("shortlabelmarker"))
+            self.assertEqual(got, ["alpha", "qq"])
+
+    def test_zero_chunk_warning_uses_the_configured_label(self):
+        with tempfile.TemporaryDirectory() as base:
+            cfg = self._planted(base, {"shortlabel": {"alpha": "al"}})
+            idx = make_index(base, QQ_CORPUS_CONFIG=cfg)
+            idx.embed = FakeEmbedder()
+            err = io.StringIO()
+            with unittest.mock.patch("sys.stderr", err):
+                idx.build_index()
+            self.assertNotIn("produced 0 chunks", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

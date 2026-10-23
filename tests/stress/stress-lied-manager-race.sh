@@ -9,8 +9,12 @@
 # Retained from the 2026-08-10 diagnosis round (see tests/stress/README.md): this loop
 # produced the pre-fix substitution evidence — 41/1300 failures at ambient load, every one
 # showing a sleep-30 job logging start+exit rc=0 in the same second (the loser's `true`
-# executed under the winner's name). Post-flock-fix the loop runs clean; the stubbed deep
-# window itself remains reachable by design and is pinned by suite test 4k.
+# executed under the winner's name). Post-flock-fix the loop does NOT run clean: the stubbed
+# deep window remains reachable by design (suite test 4k), and the same substitution still
+# lands there — measured 1/200 on the first full post-fix run (tests/stress/README.md). Each
+# one is counted and printed as deep_window_substitutions on the RESULT line, as a reported
+# residual; the exit status fails only on outcomes outside the two known ones, so it does not
+# move with that count.
 #
 # Contention lane: drives real systemd --user units in a loop — idle box only.
 # Usage: stress-lied-manager-race.sh [iterations]

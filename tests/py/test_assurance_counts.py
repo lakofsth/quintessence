@@ -25,10 +25,13 @@ python for both halves is read from the shebang as well as the extension — the
 python entry points have no `.py`, and a scan that globbed for one could not see them.
 """
 import ast
+import contextlib
 import glob
 import importlib.util
+import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,6 +42,9 @@ if ENGINE not in sys.path:
     sys.path.insert(0, ENGINE)
 
 from quintessence import atomicio  # noqa: E402  (the rate gate derives from its constants)
+
+sys.path.insert(0, os.path.join(ENGINE, "tools"))
+import sync_assurance_counts as sync  # noqa: E402  (the collection the gate and the tool share)
 
 ASSURANCE_MD = os.path.join(ENGINE, "ASSURANCE.md")
 PACKAGE = os.path.join(ENGINE, "quintessence")
@@ -292,13 +298,21 @@ def _prose_count_claims() -> list:
 
 
 def _documented(pattern: str) -> int:
-    with open(ASSURANCE_MD) as f:
-        text = f.read()
+    # The index's copy, beside the index's counts: a figure the tool wrote and nobody staged is
+    # not in the commit, so it is not what the commit is held to (sync.stated_doc).
+    try:
+        text = sync.stated_doc(ENGINE)
+    except sync.Refused as e:
+        raise AssertionError(f"the count gate cannot read the figures: {e}")
     m = re.search(pattern, text)
     if m is None:
         raise AssertionError(f"ASSURANCE.md no longer states a count matching {pattern!r} — if "
                              f"the wording changed, update this test with it")
     return int(m.group(1))
+
+
+def _unstaged_hint() -> str:
+    return f" {sync.UNSTAGED_DOC}." if sync.unstaged_doc(ENGINE) else ""
 
 
 class TestAssuranceCountsMatchReality(unittest.TestCase):
@@ -311,24 +325,198 @@ class TestAssuranceCountsMatchReality(unittest.TestCase):
         # nothing to check without it; CI installs pytest and checks it there.
         if importlib.util.find_spec("pytest") is None:
             self.skipTest("pytest not installed — the count gate reads pytest's collection count")
-        documented = _documented(r"(\d+) tests over the engine modules")
-        out = subprocess.run([sys.executable, "-m", "pytest", os.path.join("tests", "py"),
-                              "--collect-only", "-q", "-p", "no:cacheprovider"],
-                             cwd=ENGINE, capture_output=True, text=True).stdout
-        m = re.search(r"(\d+) tests collected", out)
-        self.assertIsNotNone(m, f"could not read a collected-test count from pytest:\n{out[-2000:]}")
-        actual = int(m.group(1))
+        documented = _documented(sync.PYTHON_ROW)
+        # The tool's own count, so the gate refuses exactly what the tool refuses: a collection
+        # that exits non-zero or reports an error, rather than reading "N tests collected,
+        # 1 error" as N. It collects a checkout of the index, so untracked files and unstaged
+        # edits are left out, as a clean checkout of the commit lacks them.
+        try:
+            actual = sync.collect_python_count(ENGINE)
+        except sync.Refused as e:
+            self.fail(f"the count gate refuses this collection, as the tool does: {e}")
         self.assertEqual(documented, actual,
                          f"ASSURANCE.md says {documented} python tests; pytest collects "
-                         f"{actual}. Update the number in ASSURANCE.md's 'Python tests' row.")
+                         f"{actual}. Run `{sync.COMMAND}` and commit ASSURANCE.md with the tests."
+                         f"{_unstaged_hint()}")
 
     def test_shell_suite_count_matches_the_suite_directory(self):
-        documented = _documented(r"(\d+) end-to-end suites")
-        actual = len(glob.glob(os.path.join(ENGINE, "tests", "test-*.sh")))
+        documented = _documented(sync.SHELL_ROW)
+        try:
+            actual = sync.count_shell_suites(ENGINE)
+        except sync.Refused as e:
+            self.fail(f"the count gate refuses this count, as the tool does: {e}")
         self.assertEqual(documented, actual,
                          f"ASSURANCE.md says {documented} shell suites; tests/ holds {actual} "
-                         f"test-*.sh files (what tests/run.sh iterates). Update the number in "
-                         f"ASSURANCE.md's 'Shell suites' row.")
+                         f"tracked test-*.sh files (what tests/run.sh iterates). Run "
+                         f"`{sync.COMMAND}` and commit ASSURANCE.md with the suite."
+                         f"{_unstaged_hint()}")
+
+
+_FIXTURE_DOC = ("| Python tests | `pytest` | {py} tests over the engine modules. |\n"
+                "| Shell suites | `run.sh` | {sh} end-to-end suites against a store |\n")
+
+
+def _git(cwd, *argv):
+    # A clean environment: under a hook GIT_DIR/GIT_INDEX_FILE would point at the outer repo.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid",
+                    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *argv],
+                   cwd=cwd, env=env, check=True, capture_output=True)
+
+
+@unittest.skipIf(importlib.util.find_spec("pytest") is None,
+                 "pytest not installed — the count gate reads pytest's collection count")
+class TestTheGateJudgesWhatACleanCheckoutCollects(unittest.TestCase):
+    """The gate above, run against throwaway engines (tests/INVARIANTS.md,
+    `the-count-tool-writes-what-the-gate-reads-or-nothing`, the clean-checkout clause).
+
+    Three ways the gate used to pass on a figure no clean checkout of the commit would give:
+    pytest printing `N tests collected, 1 error` was read as N; an untracked tests/py/test_*.py
+    (or tests/test-*.sh) was counted, so a commit carrying the figure without the file was red
+    only elsewhere; and the singular `1 test collected` was not read at all."""
+
+    def setUp(self):
+        self.engine = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.engine)
+        os.makedirs(os.path.join(self.engine, "tests", "py"))
+        self._write(self.engine, "tests/py/test_a.py", "def test_one():\n    pass\n\n"
+                                                       "def test_two():\n    pass\n")
+        self._write(self.engine, "tests/test-x.sh", "")
+        self._write(self.engine, "ASSURANCE.md", _FIXTURE_DOC.format(py=2, sh=1))
+        _git(self.engine, "init", "-q")
+        _git(self.engine, "add", "-A")
+        _git(self.engine, "commit", "-q", "-m", "fixture")
+
+    @staticmethod
+    def _write(engine, rel, text):
+        with open(os.path.join(engine, rel), "w") as f:
+            f.write(text)
+
+    def _gate(self, engine, method="test_python_test_count_matches_collection"):
+        """Run the real gate method with ENGINE pointed at `engine`; return its failure text,
+        or None when it passed."""
+        g = globals()
+        saved = g["ENGINE"], g["ASSURANCE_MD"]
+        g["ENGINE"], g["ASSURANCE_MD"] = engine, os.path.join(engine, "ASSURANCE.md")
+        try:
+            result = unittest.TestResult()
+            TestAssuranceCountsMatchReality(method).run(result)
+        finally:
+            g["ENGINE"], g["ASSURANCE_MD"] = saved
+        self.assertEqual((result.errors, result.skipped), ([], []),
+                         "the gate errored or skipped rather than judging")
+        return result.failures[0][1] if result.failures else None
+
+    def _shell_gate(self, engine):
+        return self._gate(engine, "test_shell_suite_count_matches_the_suite_directory")
+
+    def test_the_fixture_gate_passes_when_the_figure_is_true(self):
+        self.assertIsNone(self._gate(self.engine))
+        self.assertIsNone(self._shell_gate(self.engine))
+
+    def test_the_fixture_gate_fails_when_the_figure_is_false(self):
+        self._write(self.engine, "ASSURANCE.md", _FIXTURE_DOC.format(py=3, sh=2))
+        _git(self.engine, "add", "ASSURANCE.md")
+        self.assertIn("ASSURANCE.md says 3 python tests", self._gate(self.engine) or "")
+        self.assertIn("ASSURANCE.md says 2 shell suites", self._shell_gate(self.engine) or "")
+
+    def test_a_collection_that_reported_errors_is_refused_and_named(self):
+        # Tracked, so only the error can make it red: pytest still prints "2 tests collected,
+        # 1 error", which a gate reading the number alone passes.
+        self._write(self.engine, "tests/py/test_broken.py", "def (\n")
+        _git(self.engine, "add", "-A")
+        _git(self.engine, "commit", "-q", "-m", "broken")
+        failure = self._gate(self.engine)
+        self.assertIsNotNone(failure, "the gate passed a collection that reported an error")
+        self.assertIn("test_broken.py", failure)
+
+    def test_an_untracked_test_file_is_not_counted(self):
+        self._write(self.engine, "tests/py/test_untracked.py", "def test_three():\n    pass\n")
+        self._write(self.engine, "tests/test-untracked.sh", "")
+        # The figure a clean checkout gives (2 / 1) passes; the working tree's (3 / 2) does not.
+        self.assertIsNone(self._gate(self.engine))
+        self.assertIsNone(self._shell_gate(self.engine))
+        self._write(self.engine, "ASSURANCE.md", _FIXTURE_DOC.format(py=3, sh=2))
+        _git(self.engine, "add", "ASSURANCE.md")
+        self.assertIsNotNone(self._gate(self.engine),
+                             "the gate accepted a python figure that counts an untracked file")
+        self.assertIsNotNone(self._shell_gate(self.engine),
+                             "the gate accepted a shell figure that counts an untracked suite")
+
+    def test_a_one_test_collection_is_read(self):
+        os.remove(os.path.join(self.engine, "tests", "py", "test_a.py"))
+        self._write(self.engine, "tests/py/test_b.py", "def test_only():\n    pass\n")
+        self._write(self.engine, "ASSURANCE.md", _FIXTURE_DOC.format(py=1, sh=1))
+        _git(self.engine, "add", "-A")
+        _git(self.engine, "commit", "-q", "-m", "one test")
+        self.assertIsNone(self._gate(self.engine))
+
+    def _commit(self, message):
+        _git(self.engine, "add", "-A")
+        _git(self.engine, "commit", "-q", "-m", message)
+
+    def test_a_test_id_naming_a_count_does_not_pass_the_gate(self):
+        # Probe P3 of the round-2 review: the id `[7 tests collected]` above the summary.
+        self._write(self.engine, "tests/py/test_ids.py",
+                    "import pytest\n\n\n@pytest.mark.parametrize('summary', ['7 tests collected'])\n"
+                    "def test_reads(summary):\n    pass\n")
+        self._write(self.engine, "ASSURANCE.md", _FIXTURE_DOC.format(py=7, sh=1))
+        self._commit("an id naming a count")
+        self.assertIn("ASSURANCE.md says 7 python tests; pytest collects 3",
+                      self._gate(self.engine) or "the gate passed on the id's figure")
+        self._write(self.engine, "ASSURANCE.md", _FIXTURE_DOC.format(py=3, sh=1))
+        self._commit("the summary's figure")
+        self.assertIsNone(self._gate(self.engine))
+
+    def test_a_deselecting_conftest_is_refused_by_the_gate(self):
+        # `1/2 tests collected (1 deselected)` holds the true total, 2, which ASSURANCE.md states;
+        # the gate still refuses, because the collection it judges is not the whole one.
+        self._write(self.engine, "tests/py/conftest.py",
+                    "def pytest_collection_modifyitems(config, items):\n"
+                    "    dropped = [i for i in items if i.name == 'test_two']\n"
+                    "    config.hook.pytest_deselected(items=dropped)\n"
+                    "    items[:] = [i for i in items if i not in dropped]\n")
+        self._commit("deselect")
+        failure = self._gate(self.engine)
+        self.assertIsNotNone(failure, "the gate passed a deselected collection")
+        self.assertIn("deselected", failure)
+
+    def test_the_gate_reads_the_staged_assurance_md_and_names_an_unstaged_one(self):
+        """The counts come from the index, so the figure they are held to does too: a figure the
+        tool wrote and the author did not stage is not in the commit, and the gate says so
+        before the commit rather than at the landing."""
+        self._write(self.engine, "tests/py/test_c.py", "def test_three():\n    pass\n")
+        _git(self.engine, "add", "tests/py/test_c.py")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(sync.main(["--engine", self.engine]), 0)
+        failure = self._gate(self.engine)
+        self.assertIsNotNone(failure, "the gate passed a figure the commit does not hold")
+        self.assertIn("ASSURANCE.md says 2 python tests; pytest collects 3", failure)
+        self.assertIn("git add ASSURANCE.md", failure)
+        _git(self.engine, "add", "ASSURANCE.md")
+        self.assertIsNone(self._gate(self.engine))
+
+    def test_what_the_tool_writes_in_a_dirty_tree_is_green_in_a_clean_checkout(self):
+        """The claim itself, on a clean checkout built for it: the tool runs in a tree holding
+        an untracked test file, ASSURANCE.md alone is committed, and the gate is run in a fresh
+        clone of that commit. The control is the figure the dirty tree would give (3), which
+        the same clean checkout must reject — so the clone is one the gate CAN fail in."""
+        self._write(self.engine, "ASSURANCE.md", _FIXTURE_DOC.format(py=9, sh=9))
+        _git(self.engine, "commit", "-q", "-am", "stale figures")
+        self._write(self.engine, "tests/py/test_untracked.py", "def test_three():\n    pass\n")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(sync.main(["--engine", self.engine]), 0)
+        _git(self.engine, "add", "ASSURANCE.md")
+        _git(self.engine, "commit", "-q", "-m", "count")
+        clean = os.path.join(tempfile.mkdtemp(), "clone")
+        self.addCleanup(shutil.rmtree, os.path.dirname(clean))
+        _git(self.engine, "clone", "-q", self.engine, clean)
+        self.assertFalse(os.path.exists(os.path.join(clean, "tests", "py", "test_untracked.py")))
+        self.assertIsNone(self._gate(clean), "the tool's figure is red in a clean checkout")
+        self.assertIsNone(self._gate(self.engine), "the gate disagrees with it in the dirty tree")
+        self._write(clean, "ASSURANCE.md", _FIXTURE_DOC.format(py=3, sh=1))
+        _git(clean, "add", "ASSURANCE.md")
+        self.assertIsNotNone(self._gate(clean), "control: the clean checkout cannot fail")
 
 
 class TestAtomicWriteCallSiteCount(unittest.TestCase):

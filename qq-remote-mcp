@@ -26,6 +26,11 @@ dump widens blast radius for little resume value; it returns in Phase 2 once the
 soaked), no `qq` passthrough (it reaches every verb, including destructive ones), no `update_head`
 (Phase 1 is read-only, green-first — the write path is D4's problem and is not built here).
 
+D4 IS ANSWERED BY NOT BUILDING IT HERE. A hosted face that needs a write verb runs as its own
+process, on its own port, token and tunnel, rather than beside these three. The reason is the
+paragraph above, applied a second time: a verb defined here could be served here, so the way to
+keep "this face cannot write" true is to not define it here.
+
 D3's blocking dependency, discharged: every read verb goes through quintessence.remotepolicy,
 which fails CLOSED. `search` filters its hits; `brief` is gated on the topic BEFORE the CLI is
 invoked; `ask` runs through _PolicyAsk below, which overrides Ask.filter_redacted so the policy
@@ -64,7 +69,6 @@ from quintessence.ask import Ask, render  # noqa: E402
 from quintessence.refsview import search_hit_annotations  # noqa: E402
 from quintessence.storepath import resolve_store_path  # noqa: E402
 from quintessence.searchcompose import build_indexes, ComposedSearchIndex  # noqa: E402
-from quintessence.mcpedge import clamp_k, strip_name_hints  # noqa: E402
 from quintessence.remotepolicy import (  # noqa: E402
     PROFILE_STANDARD,
     PROFILE_WIDE,
@@ -77,24 +81,18 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
 import uvicorn  # noqa: E402
 
-# The profile for the request currently being served, set by the auth middleware from the bearer
-# token. A ContextVar (not a global) because the ASGI app is concurrent: two surfaces may be
-# mid-call at once and must not see each other's profile.
-_profile: contextvars.ContextVar[str] = contextvars.ContextVar("qq_remote_profile",
-                                                               default=PROFILE_STANDARD)
+# The per-request profile ContextVar and the audit line both live in remoteauth now.
+from quintessence import remoteauth  # noqa: E402
+from quintessence.remoteauth import _profile  # noqa: E402
+from quintessence.mcpedge import clamp_k, strip_name_hints  # noqa: E402
+remoteauth.AUDIT_PREFIX = "qq-remote"
 
 _QQ_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), "qq")
 DENIED = ("[denied] That topic is not served on this connector. It exists but is withheld by the "
           "remote deny policy — read it from a local session.")
 
 
-def audit(event: str, **fields) -> None:
-    """One line per call to stderr -> journald. The remote face is the only surface where a
-    request did not originate from the operator at a keyboard, so every call is logged: who
-    (profile), what verb, and how long (D5's latency measurement). search and brief additionally
-    log whether the policy withheld or denied content."""
-    kv = " ".join(f"{k}={v}" for k, v in fields.items())
-    print(f"[qq-remote] {event} {kv}", file=sys.stderr, flush=True)
+from quintessence.remoteauth import audit  # noqa: E402,F401
 
 
 # ---- policy-bound Ask ---------------------------------------------------------------------
@@ -137,6 +135,12 @@ def _sanitize_for_remote(result: dict) -> dict:
     if result.get("degraded"):
         result["answer"] = "QA unavailable — raw retrieval only."
     result["retrieval_degraded"] = False
+    # WHICH RUNG ANSWERED is a local fact and stays local. `render` names the endpoint that
+    # produced the answer, which is what a person at the CLI needs once `ask` walks a ladder and
+    # can answer from any rung — but it is an internal address, and this face carries none. The
+    # remote reader loses nothing it is entitled to: the audit line for this call records the
+    # raw endpoint server-side, which is where that question is answered for this face.
+    result["endpoint"] = None
     if "sources" in result:
         result["sources"] = [dict(s) for s in result["sources"]]
         for s in result["sources"]:
@@ -346,97 +350,11 @@ def resume_brief(topic: str) -> str:
         return _sanitize_outward("[brief error] command failed — detail logged server-side")
 
 
-# ---- auth: the bearer token IS the profile selector (D10) ----------------------------------
-def load_tokens(path: str) -> dict[str, str]:
-    """Parse the token file: lines of `<profile> <token>`, '#' comments, blanks skipped.
-
-    Refuses (raises) rather than degrades: a token file that is group/other-readable, missing a
-    profile, carrying a short token, or reusing the same secret for both profiles is a
-    misconfiguration that would quietly weaken the boundary, so it stops the server instead. An
-    ABSENT or unreadable token file is the same class of thing (nothing to auth against is not
-    a green light) and gets the same worded refusal, not a raw traceback.
-    """
-    try:
-        st = os.stat(path)
-    except OSError as e:
-        raise SystemExit(f"[qq-remote] refusing to start: can't read {path} "
-                         f"({e.strerror or e}) — create it (one `<profile> <token>` line per "
-                         f"profile) or fix its permissions")
-    if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        raise SystemExit(f"[qq-remote] refusing to start: {path} is group/other-accessible "
-                         f"(mode {stat.S_IMODE(st.st_mode):04o}); chmod 600 it")
-    tokens: dict[str, str] = {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            lines = list(f)
-    except OSError as e:
-        raise SystemExit(f"[qq-remote] refusing to start: can't read {path} ({e.strerror or e})")
-    for ln in lines:
-        ln = ln.split("#", 1)[0].strip()
-        if not ln:
-            continue
-        parts = ln.split()
-        if len(parts) != 2 or parts[0] not in PROFILES:
-            raise SystemExit(f"[qq-remote] refusing to start: bad line in {path} "
-                             f"(want `<{'|'.join(PROFILES)}> <token>`)")
-        tokens[parts[0]] = parts[1]
-    for prof in PROFILES:
-        if prof not in tokens:
-            raise SystemExit(f"[qq-remote] refusing to start: no `{prof}` token in {path}")
-        if len(tokens[prof]) < 32:
-            raise SystemExit(f"[qq-remote] refusing to start: `{prof}` token is shorter than 32 "
-                             f"chars — generate with `openssl rand -hex 32`")
-    if hmac.compare_digest(tokens[PROFILE_STANDARD], tokens[PROFILE_WIDE]):
-        raise SystemExit("[qq-remote] refusing to start: standard and wide tokens are identical — "
-                         "the wide profile would then be reachable by the standard credential, "
-                         "which is the entire boundary D10 puts between them")
-    return tokens
-
-
-def profile_for(header: str | None, tokens: dict[str, str]) -> str | None:
-    """Constant-time match of a bearer header to a profile. None = reject."""
-    if not header or not header.startswith("Bearer "):
-        return None
-    presented = header[len("Bearer "):].strip()
-    match = None
-    for prof in PROFILES:  # compare against BOTH, always, so timing can't reveal which one hit
-        if hmac.compare_digest(presented, tokens[prof]):
-            match = prof
-    return match
-
-
-def auth_wrapper(app, tokens: dict[str, str]):
-    """Pure-ASGI gate in front of the MCP app. The lifespan scope passes through untouched (the
-    inner app's session manager needs it); every HTTP request must carry a recognised bearer
-    token, and the token it carries selects the deny profile for that call; any other scope type
-    is closed. INVARIANTS.md: the-remote-face-names-only-what-policy-allows."""
-    async def wrapped(scope, receive, send):
-        kind = scope.get("type")
-        if kind == "lifespan":
-            return await app(scope, receive, send)
-        if kind != "http":
-            # Only HTTP carries the bearer this gate checks. A websocket (or any future scope
-            # type) used to pass through unauthenticated, safe only because no such route
-            # existed (posture review 2026-10-08, L4). Close it; never forward it.
-            audit("reject", reason=f"non-http-scope:{kind}", path=scope.get("path", ""))
-            if kind == "websocket":
-                await send({"type": "websocket.close", "code": 1008})
-            return
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
-        prof = profile_for(headers.get("authorization"), tokens)
-        if prof is None:
-            audit("reject", reason="bad-or-missing-bearer", path=scope.get("path", ""))
-            await send({"type": "http.response.start", "status": 401,
-                        "headers": [(b"content-type", b"text/plain"),
-                                    (b"www-authenticate", b"Bearer")]})
-            await send({"type": "http.response.body", "body": b"unauthorized\n"})
-            return
-        token = _profile.set(prof)
-        try:
-            return await app(scope, receive, send)
-        finally:
-            _profile.reset(token)
-    return wrapped
+# ---- auth ---------------------------------------------------------------------------------
+# Admission lives in quintessence/remoteauth.py, so a second hosted face would import it rather
+# than copy it: a drifted copy of a token comparison passes its own tests while admitting the
+# wrong caller.
+from quintessence.remoteauth import load_tokens, profile_for, auth_wrapper  # noqa: E402,F401
 
 
 def main() -> None:

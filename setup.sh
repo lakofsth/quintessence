@@ -5,7 +5,7 @@
 # what it changed. A user (or their agent) just runs:   bash setup.sh
 #
 #   bash setup.sh                 link CLIs + create store + write config (never touches settings.json)
-#   bash setup.sh --wire-claude   ALSO idempotently wire the 4 qq hooks into ~/.claude/settings.json
+#   bash setup.sh --wire-claude   ALSO idempotently wire the 5 qq hooks into ~/.claude/settings.json
 #                                 (Option B). Repoints a drifted/old qq hook, adds a missing one,
 #                                 and leaves every non-qq hook untouched. Backs up before any change.
 #
@@ -22,6 +22,22 @@ BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 export QUINTESSENCE_DIR="${QUINTESSENCE_DIR:-$HOME/quintessence}"
 export QQ_MEMDIR="${QQ_MEMDIR:-$HOME/.quintessence-memory}"
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"
+# A QUOTED `~` is not expanded by the shell that exported it, so every path override above
+# arrives here as a literal tilde and, taken verbatim, builds ./~/... under the working
+# directory while reporting success (ledger D92: the hooks were wired into ./~/.claude and the
+# real settings left untouched). EXPANDED rather than refused: `~` and `~/` have exactly one
+# meaning, the one the shell would have given them unquoted, and the defaults are $HOME-based
+# anyway. `~user` is REFUSED: it names someone else's home, and resolving that is not ours.
+_untilde() {   # NAME — rewrite a leading ~ or ~/ in $NAME against $HOME, in place
+  local v="${!1}"
+  case "$v" in
+    "~")   printf -v "$1" '%s' "$HOME" ;;
+    "~/"*) printf -v "$1" '%s' "$HOME/${v#\~/}" ;;
+    "~"*)  echo "  ✗ $1=$v names another user's home directory — write the path out in full" >&2; exit 1 ;;
+  esac
+}
+for _v in BIN_DIR QUINTESSENCE_DIR QQ_MEMDIR CLAUDE_SETTINGS SKILLS_DIR; do _untilde "$_v"; done
 WIRE=0; [ "${1:-}" = "--wire-claude" ] && WIRE=1
 # --no-self-check: skip step 5. The ONE caller is tests/test-setup-wire.sh, which runs this
 # installer for real to pin its env isolation. Without the flag that is a loop -- step 5 runs
@@ -62,7 +78,7 @@ _cfg_pref() { # KEY EXPLICIT_FLAG VALUE — honor explicit env; else keep existi
 _cfg_pref QUINTESSENCE_DIR "${_qd_explicit:-}" "$QUINTESSENCE_DIR"
 _cfg_pref QQ_MEMDIR "${_mem_explicit:-}" "$QQ_MEMDIR"
 
-# ---- 3. (opt-in) idempotently wire the 4 qq hooks into settings.json ----------------------
+# ---- 3. (opt-in) idempotently wire the 5 qq hooks into settings.json ----------------------
 if [ "$WIRE" -eq 1 ]; then
   command -v python3 >/dev/null || { echo "  ✗ --wire-claude needs python3"; exit 1; }
   HERE="$HERE" CLAUDE_SETTINGS="$CLAUDE_SETTINGS" python3 - <<'PY'
@@ -75,12 +91,18 @@ here = os.environ["HERE"]; path = os.environ["CLAUDE_SETTINGS"]
 # a dollar used to break or expand inside the hook command (L8).
 def _hook(rel):
     return "bash " + shlex.quote(os.path.join(here, rel))
+# Extra hook-entry fields the idle-autosave Stop hook needs. It polls for up to QQ_IDLE_AUTOSAVE_DELAY
+# (3000 s) of quiet, so it must be async, its exit 2 must rewake the session, and the timeout must
+# exceed the delay. Reconciled key-by-key onto an existing entry, siblings preserved.
+_IDLE_EXTRA = {"timeout": 3600, "async": True, "asyncRewake": True,
+               "rewakeMessage": "Idle-checkpoint (auto):"}
 desired = [
   ("SessionStart",   None,   _hook("hooks/inject-contract.sh"),
        ["inject-contract.sh", "CONTINUITY DISCIPLINE", "CONTRACT.md"]),
   ("UserPromptSubmit", None, _hook("resume-match.sh"),     ["resume-match.sh"]),
   ("PreToolUse",     "Bash", _hook("prederive-recall.sh"), ["prederive-recall.sh"]),
   ("Stop",           None,   _hook("finalize-check.sh"),   ["finalize-check.sh"]),
+  ("Stop",           None,   _hook("idle-autosave.sh"),    ["idle-autosave.sh"], _IDLE_EXTRA),
 ]
 # THE SYMLINK-CYCLE REFUSAL SITS BEFORE THE READ, and the position is the whole of it. This check
 # used to live beside the write, where the engine has it — and there it could never fire, because
@@ -101,7 +123,8 @@ except Exception as e:
     print(f"  ✗ settings.json unreadable ({e}) — not touching it"); sys.exit(1)
 s.setdefault("hooks", {})
 changed = []
-for event, matcher, cmd, recog in desired:
+for event, matcher, cmd, recog, *_extra in desired:
+    extra = _extra[0] if _extra else {}
     groups = s["hooks"].setdefault(event, [])
     found = False
     for g in groups:
@@ -111,8 +134,12 @@ for event, matcher, cmd, recog in desired:
                 if h["command"] != cmd:
                     h["command"] = cmd            # repoint; preserve sibling keys (asyncRewake etc.)
                     changed.append(f"{event}: repointed → qq dist")
+                for k, v in extra.items():
+                    if h.get(k) != v:
+                        h[k] = v
+                        changed.append(f"{event}: {os.path.basename(shlex.split(cmd)[-1])} {k} set")
     if not found:
-        grp = {"hooks": [{"type": "command", "command": cmd}]}
+        grp = {"hooks": [{"type": "command", "command": cmd, **extra}]}
         if matcher: grp["matcher"] = matcher
         groups.append(grp)
         changed.append(f"{event}: added qq hook")
@@ -213,7 +240,7 @@ def _reclaim_stale_temps(parent, basename):
 
 
 if not changed:
-    print("  = settings.json: 4 qq hooks already wired to this dist (no change)")
+    print("  = settings.json: 5 qq hooks already wired to this dist (no change)")
 else:
     # The budget is checked BEFORE anything is written, so a name that can never work is refused
     # with arithmetic instead of failing halfway through with a kernel message naming a path the
@@ -312,7 +339,7 @@ else:
         if interrupt is not None: raise interrupt
         raise
     for c in changed: print(f"  ↻ {c}")
-    print("  NOTE: only the 4 qq hooks were managed; all other hooks left untouched.")
+    print("  NOTE: only the 5 qq hooks were managed; all other hooks left untouched.")
     print("  NOTE: SessionStart now uses inject-contract.sh (CONTRACT + optional contract-extra +")
     print("        digest); if you relied on a custom SessionStart command (e.g. breadcrumbs), keep")
     print("        it as a SEPARATE additional SessionStart hook — they concatenate.")
@@ -343,7 +370,6 @@ fi
 # Same "wire into Claude" scope as the hooks above, so it rides on --wire-claude. Symlinks track
 # the dist (no drift); backs up a pre-existing real skill file before replacing it.
 if [ "$WIRE" -eq 1 ] && [ -d "$HERE/skills" ]; then
-  SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"
   for s in "$HERE"/skills/*/; do
     src="${s%/}/SKILL.md"; [ -e "$src" ] || continue
     name="$(basename "$s")"; dest="$SKILLS_DIR/$name"

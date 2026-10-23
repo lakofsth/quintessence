@@ -5,8 +5,10 @@
 
 Thin terminal front-end over quintessence.ask.Ask. Single-shot RAG: retrieves the
 top-k full chunks via quintessence.search, hands them to a local completion endpoint under a
-grounded-or-refuse system prompt, and prints a cited answer. Degrades to raw qq-search snippets
-(never hard-fails) if no completion endpoint is healthy. Same engine is exposed to cold sessions
+grounded-or-refuse system prompt, and prints a cited answer. The configured endpoints are a
+ladder: each is asked in turn and one that fails to complete steps down to the next, so raw
+qq-search snippets (never a hard failure) are what comes back when every rung has failed. The
+answer names the endpoint that produced it, in the text output and in --json alike. Same engine is exposed to cold sessions
 as an MCP tool via qq-search-mcp (ask_continuity) — that MCP tool stays STORE-ONLY
 (--transcripts is a CLI-only opt-in, never wired into ask_continuity).
 

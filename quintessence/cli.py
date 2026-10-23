@@ -22,6 +22,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
+from . import authgate
 from .config import Config
 from .findings import FindingsFile, parse_line
 from .heads import count_update_markers, head_meta, legacy_brief, stamp_datetime, stamp_of
@@ -400,8 +401,16 @@ _BACKTICK_RE = re.compile(r"`([^`]+)`")
 # (the untrusted model's own prose) is not promoted whatever it says (posture review
 # 2026-10-08, M9). INVARIANTS.md: a-ready-command-comes-from-the-template.
 _READY_CMD_RE = re.compile(
-    r"qq (?:check --write|compact|waveoff|brief|show|update|rewrite|finalize|reindex|fact|menu)"
+    r"qq (?:check --write|compact|waveoff|brief|show|finalize|reindex|fact|menu"
+    + "".join("|" + v for v in authgate.GATED_VERBS) + r")"
     r"(?: [A-Za-z0-9][A-Za-z0-9._-]*)*")
+
+
+def _ready(cmd: str) -> str | None:
+    """The one gate every `qq ...` command render_findings_next offers passes through: the
+    command, or None when it is not the template shape (a topic/memory name the writer chose
+    may carry shell metacharacters; nothing unquoted is offered)."""
+    return cmd if _READY_CMD_RE.fullmatch(cmd) else None
 
 
 def render_findings_next(store: Store, config: Config, findings: FindingsFile) -> str:
@@ -437,7 +446,9 @@ def render_findings_next(store: Store, config: Config, findings: FindingsFile) -
         out += "\n"
         out += brief_one(store, h)
         out += "to resolve:\n"
-        out += f"  compatible, not stale:  qq waveoff {m} {h}\n"
+        wo = _ready(f"qq waveoff {m} {h}")
+        if wo:
+            out += f"  compatible, not stale:  {wo}\n"
         out += f"  genuinely stale:        edit {mpath}, then re-run: qq check --write\n"
         return out
 
@@ -451,17 +462,43 @@ def render_findings_next(store: Store, config: Config, findings: FindingsFile) -
             out += "\n"
         out += "to resolve:\n"
         if finding.fields.get("kind") == "update-lines":
-            out += f"  qq compact {h}\n"
-        else:
+            if _ready(f"qq compact {h}"):
+                out += f"  qq compact {h}\n"
+        elif _ready(f"qq brief {h}"):
             out += (f"  condense the ## sections in {h} by hand (qq rewrite); read cheaply "
                     f"meanwhile: qq brief {h}\n")
         return out
 
-    if finding.cls == "PROPOSED write" and {"verb", "head"} <= finding.fields.keys():
-        cmds = [f"qq {finding.fields['verb']} {finding.fields['head']}"]
+    unparsed_proposal = False
+    bare_new = False
+    if finding.cls == "PROPOSED write":
+        # Decided by the marker, never by parse success: the generic branch's backtick
+        # extraction must not read a line whose text an untrusted writer chose.
+        # Only a gated verb is offered: queue_proposal is called with nothing else, so any
+        # other verb on a PROPOSED line was not written by it (a-ready-proposed-verb-is-a-gated-verb).
+        if ({"verb", "head"} <= finding.fields.keys()
+                and finding.fields["verb"] in authgate.GATED_VERBS):
+            cmds = [f"qq {finding.fields['verb']} {finding.fields['head']}"]
+            if finding.fields["verb"] == "new":
+                # `qq new <head>` with no essence succeeds and writes the placeholder, so the
+                # bare form is not a ready command: the text goes on argv
+                # (a-ratification-never-drops-the-proposed-text).
+                cmds = []
+                bare_new = True
+        else:
+            cmds = []
+            unparsed_proposal = True
     else:
-        cmds = [c for c in _BACKTICK_RE.findall(line) if _READY_CMD_RE.fullmatch(c)]
+        cmds = _BACKTICK_RE.findall(line)
+    cmds = [c for c in cmds if _ready(c)]
     out += "to resolve:\n"
+    if unparsed_proposal:
+        out += ("  (no ready command: this PROPOSED write line did not parse, or names a verb "
+                "outside the gated set, so none is offered)\n")
+    if bare_new:
+        out += (f"  (no ready command: qq new takes the text as its argv, and without it writes "
+                f"a placeholder essence; run: qq new {finding.fields['head']} '<the proposed "
+                f"text, decoded>')\n")
     for c in cmds:
         out += f"  {c}\n"
     out += "  or: edit the source file directly, then re-run: qq check --write\n"

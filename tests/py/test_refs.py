@@ -10,10 +10,13 @@ tests/test-bind.sh's job; this file pins the module in isolation on throwaway fi
 never the live ~/quintessence."""
 from __future__ import annotations
 
+import ast
 import contextlib
+import glob
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -22,7 +25,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+_ENGINE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _ENGINE_ROOT)
 
 from quintessence import refs as r
 from quintessence import write as w
@@ -830,11 +834,221 @@ class TestGitDriver(unittest.TestCase):
                 r._fp_git(f"repo@{self.sha[:7]}", {"repo": self.repo})
 
 
+# ---------------------------------------------------------------------------------------------
+# Which questions in this file can only be answered by a live systemd USER manager, and what
+# happens on a host that has systemctl but no session bus for it.
+#
+# `_fp_unit_bases` asks BOTH scopes and treats a scope that answers anything other than the
+# absence diagnostic as an ERROR — deliberately: a unit that exists in a scope it cannot be read
+# from must not come back absent, because absence is the LOUD path (a born-stale warning) while a
+# driver error is the quiet one. So the one test below that asks the driver a real question — not
+# through `fake_systemctl`, against the host's actual manager — can only be answered when the
+# user scope can answer, and the user scope needs a user D-Bus.
+#
+# Measured at ed478f5 in the environment the estate's unattended runners actually have,
+# `env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS bash tests/run.sh`: the python suite came
+# back `Ran 1112 tests ... FAILED (errors=1, skipped=2)`, the single error being this test, and
+# `tests/test-tsk.sh` printed its own `SKIP: no systemd user manager on this host` in the same
+# run. That bash gate is the precedent this one copies rather than an invention of it; ledger
+# D40 and D104 carry the open row ("environment-dependent gate") this closes. the queue worker unit
+# is a SYSTEM unit and no fragment under /etc/systemd/system/<that unit>* sets either variable,
+# so every queue worker on this host lands in exactly the stripped environment — and so does
+# `qq-promote --go` when nothing else supplies a bus: its own gate is `python3 -m pytest tests/py -q`
+# over the dev tip, which measured `1 failed, 1109 passed, 2 skipped` at `ed478f5` in that
+# environment. (The estate's merge gate does NOT reach this repository yet — measured 2026-09-11 at
+# the deployed gate revision, which resolves only the queue's own `tests/run.sh`; the branch that
+# widens it to `tests/run.sh` is unlanded. It gates on absolute green, so on the day it lands this
+# becomes a landing condition too.)
+#
+# The predicate keys on the bus-connection refusal and on NOTHING else — never on `No files
+# found`. A guard that read the absence diagnostic would absorb the exact regression the test
+# under it exists to catch: a systemd that stopped printing that text would skip instead of
+# failing. Its failure mode is therefore the visible one — an unrecognised refusal reads as
+# "answers", the test RUNS, and the error surfaces as it did before this guard existed.
+_USER_BUS_REFUSAL = "Failed to connect"   # every systemd spelling starts this way: "Failed to
+                                          # connect to bus: ..." and "Failed to connect to user
+                                          # scope bus via local transport: ..."
+
+
+def _user_manager_answers() -> bool:
+    """Does `systemctl --user` answer here at all, as opposed to refusing for want of a bus?
+
+    A manager that answers with an error this probe does not recognise counts as ANSWERING: what
+    is being taken out of the suite is the absence of a session bus, never a particular command's
+    opinion, so a healthy host can never lose the test to the guard (see
+    `TestUserManagerGuard.test_a_manager_that_answers_but_disagrees_does_not_skip`)."""
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        probe = subprocess.run(["systemctl", "--user", "show", "--property=LogLevel"],
+                               capture_output=True, text=True, timeout=r._PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return _USER_BUS_REFUSAL not in probe.stderr
+
+
 @unittest.skipUnless(shutil.which("systemctl"), "systemctl not on this host")
 class TestUnitDriver(unittest.TestCase):
+    # Method-level, not class-level: every other test in this file's neighbourhood drives the
+    # unit driver through `fake_systemctl` and needs no manager of any kind.
+    @unittest.skipUnless(_user_manager_answers(),
+                         "no user manager answers `systemctl --user`, so the user scope cannot "
+                         "return an absence and the driver reports a scope error instead of "
+                         "missing — see _user_manager_answers for the measurement and the "
+                         "precedent")
     def test_nonexistent_unit_is_missing(self):
         fp, status = r._fp_unit("qq-b1-definitely-not-a-unit.service")
         self.assertEqual((fp, status), (None, "missing-at-write"))
+
+
+# ---- the guard's own pins -----------------------------------------------------------------------
+# The guard is a predicate over the invoking environment, and an environment-dependent SKIP is
+# the one shape in this repo's ledger that has been written and then found vacuous (D115: three
+# rounds asserted the manager-bound assertions never ran in CI; the CI logs showed them running).
+# So the predicate is pinned on doubles in BOTH directions, with no host assumption in the test.
+class TestUserManagerGuard(unittest.TestCase):
+    def _probe(self, stderr: str, rc: int = 1, exc: Exception | None = None) -> bool:
+        def runner(argv, **kw):
+            if exc is not None:
+                raise exc
+            return subprocess.CompletedProcess(argv, rc, stdout="", stderr=stderr)
+        with mock.patch("subprocess.run", side_effect=runner):
+            return _user_manager_answers()
+
+    def test_the_measured_bus_refusal_skips(self):
+        # captured verbatim on the author's host with XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS unset
+        self.assertFalse(self._probe(
+            "Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS "
+            "and $XDG_RUNTIME_DIR not defined (consider using --machine=<user>@.host --user to "
+            "connect to bus of other user)"))
+
+    def test_the_older_systemd_bus_refusal_spelling_skips(self):
+        self.assertFalse(self._probe("Failed to connect to bus: No such file or directory"))
+
+    def test_an_answering_manager_does_not_skip(self):
+        self.assertTrue(self._probe("", rc=0))
+
+    def test_a_manager_that_answers_but_disagrees_does_not_skip(self):
+        # Reachable, unhappy about the property, nonzero rc: the guard must say ANSWERS, or the
+        # test under guard silently disappears on a healthy host — a skip that also skips with a
+        # bus present has removed the test, not fixed it.
+        self.assertTrue(self._probe("Unknown property 'LogLevel' / foo.", rc=1))
+
+    def test_systemctl_exploding_skips(self):
+        self.assertFalse(self._probe("", exc=OSError("systemctl gone between which and run")))
+        self.assertFalse(self._probe("", exc=subprocess.TimeoutExpired(["systemctl"], 1)))
+
+
+# ---- the derivation: no OTHER test may reach the driver unmocked without the guard -------------
+def _systemctl_surface() -> set:
+    """Every function in `quintessence/refs.py` that invokes systemctl, plus every function in
+    that module that calls one — the module's UNIT-DRIVER SURFACE, read from refs.py's own AST so
+    a driver entry point written next month joins the set the day it is written. D40's own note on
+    this suite is that its environment guards were "hand-added per environment"; this is the
+    enumeration that replaces the hand-list for the unit driver.
+
+    Bounded to TWO layers on purpose, and the bound is the claim: `_fingerprint` is in the surface
+    because it calls `_fp_unit`, and it reaches systemctl only for `kind == "unit"` — so a test
+    that calls `_fingerprint` unmocked for another kind would be flagged by this pin and would
+    have to say why it is not (today: no test calls `_fingerprint` at all, and the surface's only
+    unmocked caller is `TestUnitDriver`). What the pin does NOT reach is a test that arrives at a
+    unit fingerprint through `bind_write` with unit prose and no double; `bind_write` is
+    therefore deliberately outside the surface — including it would flag every bind test in the
+    file, almost none of which names a unit."""
+    with open(os.path.join(_ENGINE_ROOT, "quintessence", "refs.py"), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    def calls_systemctl(node) -> bool:
+        """A literal `systemctl` argv position passed to a subprocess entry point."""
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr in ("run", "run_output", "check_output", "Popen", "call")
+                    and sub.args and isinstance(sub.args[0], (ast.List, ast.Tuple))
+                    and sub.args[0].elts):
+                first = sub.args[0].elts[0]
+                if isinstance(first, ast.Constant) and first.value == "systemctl":
+                    return True
+        return False
+
+    def calls_names(node) -> set:
+        out = set()
+        for c in ast.walk(node):
+            if not isinstance(c, ast.Call):
+                continue
+            if isinstance(c.func, ast.Attribute):
+                out.add(c.func.attr)
+            elif isinstance(c.func, ast.Name):
+                out.add(c.func.id)
+        return out
+
+    funcs = {n.name: n for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    surface = {name for name, node in funcs.items() if calls_systemctl(node)}
+    for _ in range(2):                        # exactly two layers of callers above those
+        surface |= {name for name, node in funcs.items()
+                    if name not in surface and calls_names(node) & surface}
+    return surface
+
+
+def _unmocked_surface_callers(directory: str) -> list:
+    """[(file, class, method)] for every test method in `directory` that calls a member of
+    `_systemctl_surface()` OUTSIDE a `with` block that installs a double — derived by walking the
+    test tree, never by naming the files. A `with` counts as a double when its context expression
+    is `mock.patch`/`patch.object` or a call to one of this repo's `fake_*` doubles, which is the
+    convention `fake_systemctl` and `fake_systemctl_run` already follow. A method already carrying
+    the guard (on itself or on its class) is not a finding."""
+    hits = []
+    surface = _systemctl_surface()
+    for path in sorted(glob.glob(os.path.join(directory, "test_*.py"))):
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+            if _is_bus_guard(cls.decorator_list):
+                continue
+            for meth in (n for n in cls.body if isinstance(n, ast.FunctionDef)
+                         and n.name.startswith("test")):
+                if _is_bus_guard(meth.decorator_list):
+                    continue
+                under_double = set()
+                for node in ast.walk(meth):
+                    if not isinstance(node, ast.With):
+                        continue
+                    text = " ".join(ast.unparse(item.context_expr) for item in node.items)
+                    if ("mock.patch" in text or "patch.object" in text
+                            or re.search(r"\bfake_\w+", text)):
+                        under_double |= {id(d) for d in ast.walk(node)}
+                for call in ast.walk(meth):
+                    if not isinstance(call, ast.Call):
+                        continue
+                    name = (call.func.attr if isinstance(call.func, ast.Attribute)
+                            else call.func.id if isinstance(call.func, ast.Name) else None)
+                    if name in surface and id(call) not in under_double:
+                        hits.append((os.path.basename(path), cls.name, meth.name))
+                        break
+    return hits
+
+
+_USER_GUARD_NAME = "_user_manager_answers"
+
+
+def _is_bus_guard(decorators) -> bool:
+    return any(_USER_GUARD_NAME in ast.unparse(d) for d in decorators)
+
+
+class TestBusGuardCoversEveryUnmockedDriverSite(unittest.TestCase):
+    """The class D40/D104 name: an environment-dependent test with no guard is a red gate on
+    whoever invokes it. This quantifies over the derivation rather than trusting the next author
+    to remember the decorator exists."""
+
+    def test_every_unmocked_unit_driver_test_carries_the_bus_guard(self):
+        unguarded = _unmocked_surface_callers(os.path.dirname(os.path.abspath(__file__)))
+        self.assertEqual(
+            unguarded, [],
+            "these tests call the unit driver with no double installed and no "
+            f"{_USER_GUARD_NAME} guard, so they will error on any host whose user manager has no "
+            f"bus (a queue worker, a container): {unguarded}. Decorate them with "
+            f"@unittest.skipUnless({_USER_GUARD_NAME}(), ...) — the guard lives in this file "
+            "beside TestUnitDriver.")
 
 
 def fake_systemctl(cat_scopes=("system",), enabled_state="enabled", unit_text="[Unit]\nX=1\n",

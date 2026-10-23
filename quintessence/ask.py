@@ -57,6 +57,39 @@ HOME = os.path.expanduser("~")
 # docstring's note on QQ_ASK_ENDPOINTS's now-empty default) -----------------------------------
 _BUDGET = {"http://127.0.0.1:8090": 200_000, "http://127.0.0.1:11435": 36_000}
 _DEFAULT_BUDGET = 36_000
+
+
+# The grammar of a whole number in a `url=<whole number>` config value: plain ASCII digits,
+# nothing else. Not `int()`'s grammar — int() also reads `1_0` as 10 (digit separator), `+1`
+# as 1 (sign) and `٣` as 3 (Unicode decimal digit), and each of those is a hand-typo that
+# would pin a value the operator never wrote. Not `str.isdigit()` either — it accepts
+# characters int() rejects (`"²".isdigit()` is True while `int("²")` raises). `[0-9]+` closes
+# both directions: what passes it always converts, and negatives — including llama-server's
+# -1 "any slot" sentinel — are rejected by the grammar itself.
+_WHOLE_NUMBER_RE = re.compile(r"[0-9]+")
+
+
+def _url_int_entries(entries) -> dict:
+    """`url=<whole number>` config entries, as {url: int}, skipping every entry whose value
+    is not one. ONE parser for both keys shaped this way (QQ_ASK_BUDGETS, QQ_ASK_SLOTS),
+    because both want the same answer to a malformed line: leave the endpoint out of the map,
+    so it falls back to the unconfigured behaviour instead of carrying a value nobody can act
+    on.
+
+    "Whole number" means spelled in plain ASCII digits — see `_WHOLE_NUMBER_RE` for why the
+    recognition is a grammar and not `int()`, whose wider acceptance (`1_0` read as 10, `+1`
+    as 1, Unicode digits as their values) would send a typo'd config line out as a pin to a
+    slot the operator never named, or a budget nobody wrote."""
+    parsed = {}
+    for entry in entries:
+        url, sep, value = entry.partition("=")
+        value = value.strip()
+        if not url.strip() or not sep or not _WHOLE_NUMBER_RE.fullmatch(value):
+            continue
+        parsed[url.strip()] = int(value)
+    return parsed
+
+
 ENDPOINT_TIMEOUT = 2
 COMPLETION_TIMEOUT = 120
 MAX_TOKENS = 700
@@ -105,26 +138,126 @@ class Ask:
         # fallback usable, and it is a deployment fact, so it belongs in config, not in the literal
         # below (which stays as the default for the endpoints it names).
         self.budgets = dict(_BUDGET)
-        for entry in config.get_list("QQ_ASK_BUDGETS"):
-            url, _, chars = entry.partition("=")
-            if url.strip() and chars.strip().isdigit():
-                self.budgets[url.strip()] = int(chars.strip())
+        self.budgets.update(_url_int_entries(config.get_list("QQ_ASK_BUDGETS")))
+
+        # Model NAME per endpoint, same `url=value` shape as the budgets above. Only endpoints
+        # that SELECT a model by name need one: llama-server serves whatever it loaded and
+        # ignores the field, ollama selects by it and 404s on a name it does not have. Which
+        # server sits on which port is a deployment fact, so it is config, not a literal here.
+        self.models = {}
+        for entry in config.get_list("QQ_ASK_MODELS"):
+            url, _, name = entry.partition("=")
+            if url.strip() and name.strip():
+                self.models[url.strip()] = name.strip()
+
+        # SLOT per endpoint, same `url=value` shape again. Only for a resident multi-slot
+        # llama-server this client SHARES: `id_slot` tells the server which slot serves the
+        # request instead of letting it place the request itself, which on an idle server
+        # means slot 0 — so every unpinned client lands on the same slot, and a client that
+        # reads slot 0 to decide the server is busy waits behind traffic that was never meant
+        # to be there. Which port holds a multi-slot server, and which slot is this client's,
+        # is a deployment fact (the estate's map is the operator's carrier map), so it is
+        # config rather than a literal here.
+        self.slots = _url_int_entries(config.get_list("QQ_ASK_SLOTS"))
 
     def _budget_for(self, endpoint: str) -> int:
         return self.budgets.get(endpoint, _DEFAULT_BUDGET)
 
-    def probe_endpoint(self, endpoint: str) -> bool:
-        try:
-            with httpdirect.urlopen(f"{endpoint}/health", timeout=ENDPOINT_TIMEOUT) as r:
-                return 200 <= r.status < 300
-        except Exception:
-            return False
+    def _model_for(self, endpoint: str) -> Optional[str]:
+        """The model name a request to this endpoint will carry, or None if it will carry none.
+        ONE derivation, read by the probe and by the completion call alike, so what the probe
+        certifies cannot drift from what the request actually needs."""
+        return self.models.get(endpoint)
 
-    def pick_endpoint(self) -> Optional[str]:
+    def _slot_for(self, endpoint: str) -> Optional[int]:
+        """The slot a request to this endpoint will be pinned to, or None if it will name none.
+        None and 0 are DIFFERENT answers — 0 is a real slot, and the one an unpinned request
+        lands on — so callers test against None and never for truthiness."""
+        return self.slots.get(endpoint)
+
+    # The per-endpoint directives `_complete` merges into the request body: the body key, and
+    # the accessor that derives its value for an endpoint. ONE account, walked to build the
+    # body, so a directive added later cannot be added to the body and forgotten by the test
+    # that holds every directive to the same rule — omit it entirely unless config names a
+    # well-formed value for THIS endpoint. That rule is not fastidiousness: each of these is an
+    # instruction to the server about how to serve this request, and a wrong one is refused
+    # rather than approximated — a 404 for a model name the server does not hold, a rejection
+    # for a slot it does not have. `ask` reads any of those as "this rung failed" and steps
+    # down its ladder, so a bad directive costs the answer a healthy tier and says nothing.
+    _BODY_DIRECTIVES = (
+        ("model", "_model_for"),
+        ("id_slot", "_slot_for"),
+    )
+
+    @staticmethod
+    def _served_models(payload) -> set:
+        """The model names an OpenAI-shaped `/v1/models` body says the server can serve, read
+        from `data[].id`. ollama tags an untagged pull `:latest` and answers to either spelling,
+        so both are entered — the probe certifies against what the server will ACCEPT, not
+        against a stricter string compare that would fail a name the completion would have
+        selected fine."""
+        names = set()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        for entry in data or []:
+            name = entry.get("id") if isinstance(entry, dict) else None
+            if isinstance(name, str) and name:
+                names.add(name)
+                if name.endswith(":latest"):
+                    names.add(name[: -len(":latest")])
+        return names
+
+    def probe_endpoint(self, endpoint: str) -> bool:
+        # A probe answers ONE question — will the request this ladder is about to send succeed
+        # here? — so it certifies whatever the SERVER makes that request depend on. The two arms
+        # below are the two shapes `_complete` builds, and both read `_model_for`, the same
+        # derivation `_complete` builds the body from: what is certified cannot drift from what
+        # is sent, because there is no second list to keep in step.
+        #
+        # NO NAME (llama-server): the body names no model, the server answers with whatever it
+        # loaded, and a process that answers is the whole precondition. /health is the right
+        # question and it answers 503 while the model is still loading — the property the ladder
+        # relies on to skip a tier that is not ready yet, so it must keep using /health.
+        #
+        # A NAME (ollama): the body names a model, and a name the server does not hold is a 404
+        # on the completion. ollama does not serve /health at all (404); it answers /v1/models,
+        # and that answer LISTS what it can serve — so read the list and certify the configured
+        # name is in it, rather than reading a 200 as the answer to a question nobody asked. A
+        # status alone certifies that a process is up, which is not what the request needs.
+        #
+        # The ON-DEMAND tier survives this unchanged, which is the point of certifying against
+        # the LIST rather than against residency: ollama lists a model it is holding no VRAM
+        # for, and the completion call pays the load (~3s, page-cache warm) well inside
+        # COMPLETION_TIMEOUT. A tier that had to be resident to be picked could not idle at zero.
+        model = self._model_for(endpoint)
+        path = "/health" if model is None else "/v1/models"
+        try:
+            with httpdirect.urlopen(f"{endpoint}{path}", timeout=ENDPOINT_TIMEOUT) as r:
+                if not 200 <= r.status < 300:
+                    return False
+                if model is None:
+                    return True
+                served = self._served_models(json.load(r))
+        except Exception:
+            # Fail CLOSED, including on a body that will not parse: an answer the probe cannot
+            # read certifies nothing, and "certifies nothing" is not "ready". The cost of being
+            # wrong here is one rung skipped rather than one question lost, because a rung that
+            # does not certify falls to the next one (see ask()).
+            return False
+        return model in served
+
+    def certified_endpoints(self):
+        """Every configured rung that certifies, in ladder order, probed lazily — a rung is
+        probed only when the ladder actually reaches it, so an answer from the top rung still
+        costs one probe."""
         for e in self.endpoints:
             if self.probe_endpoint(e):
-                return e
-        return None
+                yield e
+
+    def pick_endpoint(self) -> Optional[str]:
+        """The first rung that certifies. `qq doctor` reports this one as the endpoint `ask`
+        would reach; ask() itself walks the whole ladder (see its own comment). Both read
+        certified_endpoints(), so they cannot disagree about which rungs are up."""
+        return next(self.certified_endpoints(), None)
 
     # ---- redaction (unchanged semantics from qqask_core.filter_redacted) -------------------
     def _redact_entries(self) -> list:
@@ -257,6 +390,16 @@ class Ask:
             "max_tokens": MAX_TOKENS,
             "chat_template_kwargs": {"enable_thinking": False},
         }
+        # Each directive is omitted entirely for an endpoint config names no value for, rather
+        # than sent as a placeholder: a wrong model name is a 404 at an endpoint that selects
+        # by name, and a slot the server does not have is a refused request. `_model_for` is
+        # the same reading `probe_endpoint` certifies against, so the name sent here is the
+        # name the probe checked was served. Tested against None, not for truthiness, because
+        # slot 0 is a real slot.
+        for key, accessor in self._BODY_DIRECTIVES:
+            value = getattr(self, accessor)(endpoint)
+            if value is not None:
+                body[key] = value
         req = urllib.request.Request(
             f"{endpoint}/v1/chat/completions",
             data=json.dumps(body).encode(),
@@ -361,25 +504,48 @@ class Ask:
         retrieval_degraded = bool(hits) and bool(hits[0].get("degraded"))
         if not hits or (not hits[0].get("degraded") and hits[0]["score"] < self.min_sim):
             return self._no_evidence(hits, retrieval_degraded)
-        endpoint = self.pick_endpoint()
-        if endpoint is None:
-            return self._degraded(hits, retrieval_degraded=retrieval_degraded)
-        evidence, sources = self.build_evidence(hits, self._budget_for(endpoint))
-        try:
-            answer = self._complete(endpoint, question, evidence)
-        except Exception as e:  # noqa: BLE001
-            # Name the endpoint and the exception CLASS: the two failures look identical from the
-            # outside but need opposite fixes — a socket timeout means the model is too slow for
-            # its evidence budget (shrink QQ_ASK_BUDGETS for it), while an HTTPError usually means
-            # the pack overflowed the server's context window (raise its -c, or shrink the budget).
-            # Both were hit within an hour of each other on 2026-07-13; the old single message
-            # ("no completion endpoint healthy") described neither.
+        # THE LADDER. A rung that certifies can still fail to complete — a timeout, a context
+        # overflow, an answer with no text in it — and that is a fact about THAT rung, not about
+        # the ladder: the rung below is usually slower and still perfectly able to answer.
+        # Stepping down to it is the whole reason several endpoints are configured rather than
+        # one, so a single rung's failure is not the ladder's verdict and raw retrieval is
+        # reserved for every rung failing.
+        #
+        # The evidence pack is rebuilt per rung, not once before the loop: its size is a
+        # property of the ENDPOINT (`_budget_for`), and a pack sized for the GPU tier is exactly
+        # what the CPU tier below it cannot chew inside COMPLETION_TIMEOUT.
+        failures = []
+        for endpoint in self.certified_endpoints():
+            evidence, sources = self.build_evidence(hits, self._budget_for(endpoint))
+            try:
+                answer = self._complete(endpoint, question, evidence)
+            except Exception as e:  # noqa: BLE001
+                # Name the rung and the exception CLASS: the two failures look identical from
+                # the outside but need opposite fixes — a socket timeout means the model is too
+                # slow for its evidence budget (shrink QQ_ASK_BUDGETS for it), while an
+                # HTTPError usually means the pack overflowed the server's context window (raise
+                # its -c, or shrink the budget). Both were hit within an hour of each other on
+                # 2026-07-13; the old single message ("no completion endpoint healthy")
+                # described neither.
+                failures.append(f"{endpoint} certified but the completion failed: "
+                                f"{type(e).__name__}")
+                continue
+            # WHICH RUNG ANSWERED is part of the answer. `render` prints it and `--json` /
+            # ask_continuity carry it, so a ladder that quietly fell past its top rung for a
+            # month is visible in any single answer rather than only in a doctor run.
+            return {"answer": answer, "sources": sources, "endpoint": endpoint,
+                    "degraded": False, "retrieval_degraded": retrieval_degraded}
+        if failures:
             return self._degraded(
-                hits, f"{endpoint} answered the health probe but the completion failed: "
-                      f"{type(e).__name__} (timeout is {COMPLETION_TIMEOUT}s)",
+                hits, "every rung failed — " + "; ".join(failures)
+                      + f" (completion timeout is {COMPLETION_TIMEOUT}s)",
                 retrieval_degraded=retrieval_degraded)
-        return {"answer": answer, "sources": sources, "endpoint": endpoint, "degraded": False,
-                "retrieval_degraded": retrieval_degraded}
+        if not self.endpoints:
+            return self._degraded(hits, "QQ_ASK_ENDPOINTS is empty — no completion endpoint "
+                                        "is configured", retrieval_degraded=retrieval_degraded)
+        return self._degraded(
+            hits, f"none of the {len(self.endpoints)} configured endpoint(s) certified",
+            retrieval_degraded=retrieval_degraded)
 
 
 RETRIEVAL_DEGRADED_WARNING = "⚠ embedder unreachable — showing KEYWORD fallback results (run `qq doctor`)."
@@ -400,6 +566,15 @@ def render(result: dict, banner: Optional[str] = None) -> str:
         lines.append("")
     lines.append(result["answer"])
     lines.append("")
+    # The rung that answered, named on the surface a PERSON reads. The dict has carried
+    # `endpoint` all along for a caller that parses it, and the CLI's --json still hands that
+    # straight over; the text surface dropped it, which is where it was needed once ask() began
+    # stepping down a ladder — an answer from the third rung and an answer from the first read
+    # identically otherwise. Omitted, not blanked, on a degraded/refused result, where the
+    # answer itself already says no rung answered.
+    if result.get("endpoint"):
+        lines.append(f"answered by {result['endpoint']}")
+        lines.append("")
     if result["sources"]:
         lines.append("sources:")
         for s in result["sources"]:

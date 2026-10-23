@@ -6,6 +6,58 @@
 Changes that ask something of you, newest first. Everything else is in the commit log; this file
 is for the things you would want to know before or just after pulling.
 
+## Unreleased — idle-checkpoint autosave hook
+
+### What changed
+
+A new async Stop hook, `idle-autosave.sh`, wakes a session that has gone quiet so it can capture its
+synthesis into a HEAD while its context is still in view and the prompt cache is still warm — before
+Claude Code's idle compaction (lossy) and the cache edge. It fires only after
+`QQ_IDLE_AUTOSAVE_DELAY` seconds (default 3000) of continuous transcript quiet, only when the
+session had genuine new activity since its last checkpoint, and never on its own wake. See
+[INSTALL.md](INSTALL.md#idle-checkpoint-autosave).
+
+### What it asks of you
+
+- **Plugin installs get it automatically** (a seventh bundled hook). It is silent unless it fires;
+  when it does, the session sees a short "auto-woken" instruction and is told to checkpoint lightly
+  or do nothing. Set `QQ_IDLE_AUTOSAVE_DISABLE=1` to turn it off.
+- **Option B installs:** re-run `bash setup.sh --wire-claude`; it now manages five hooks and adds
+  this one with `async`, `asyncRewake`, `timeout` 3600 and `rewakeMessage`. The timeout must stay
+  above the delay. If you wired a hand-written copy, the installer repoints it and adds any of
+  those fields it lacks, keeping the rest of your entry.
+- Four new config keys (`QQ_IDLE_AUTOSAVE_DELAY/POLL/STATE/DISABLE`, see CONFIG.md). The state
+  directory defaults to `$QQ_STATE_DIR/idle-autosave`.
+- Needs `jq` (and `python3` for the quoted-mention check). Without `jq` the hook exits silently.
+- Do not raise the delay toward 3600: idle compaction fires at 54–55 minutes of quiet and its
+  transcript write resets the hook's clock.
+
+## Unreleased — `qq ask` endpoints, stricter text channels, installer paths
+
+### What changed
+
+- **`qq ask` endpoints.** `QQ_ASK_ENDPOINTS` are tried in the order written, and an endpoint that
+  passes its probe but then fails to complete (a timeout, a context overflow, an empty answer)
+  now steps down to the next one instead of ending the ask. Two new per-endpoint keys, both
+  `url=value` lists: `QQ_ASK_MODELS` names the model for a server that selects by name (ollama),
+  and `QQ_ASK_SLOTS` pins a slot on a resident multi-slot llama-server shared with other clients.
+  An endpoint with a named model passes its probe only if it actually lists that model.
+- **Text is landed or refused, never dropped.** `qq new` with no text argument and data waiting
+  on stdin exits 2 instead of creating the HEAD with a placeholder essence; `qq new` and
+  `qq essence` read their text from arguments only. `qq rewrite` given text as an argument exits 2;
+  its text comes on stdin. `qq update` with both takes the argument and does not read stdin.
+- **Installer path overrides.** `setup.sh` expands a leading `~` or `~/` in `BIN_DIR`,
+  `QUINTESSENCE_DIR`, `QQ_MEMDIR`, `SKILLS_DIR` and `CLAUDE_SETTINGS`; a quoted `~` used to build
+  a literal `./~` directory under the working directory. `~user` is refused, naming the variable.
+
+### What it asks of you
+
+- An `ask` rung naming a model its server has not pulled now fails its probe and is skipped,
+  where it used to pass the probe and fail every completion. `qq doctor` names the endpoint
+  `ask` will use; each answer ends with the one that answered.
+- Scripts that pipe text into `qq new`, or pass `qq rewrite` its text as an argument, now get
+  exit 2: pass `qq new` its text as an argument and pipe `qq rewrite` its text.
+
 ## Unreleased — update-lines say which agent wrote them
 
 ### What changed

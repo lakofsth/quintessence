@@ -82,6 +82,7 @@ def _gate_divert(store: Store, verb: str, topic: str, content: str, model: str) 
     would-refuse guards, so the gate never converts a write that would have FAILED into a
     silent success (error behavior stays identical even for gated slugs). A queue-write
     failure is loud (nonzero WriteError), never a silent drop of the proposed content."""
+    assert verb in authgate.GATED_VERBS, verb
     try:
         notice = authgate.queue_proposal(store, verb, topic, content, model)
     except Exception as e:

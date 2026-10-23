@@ -17,8 +17,8 @@ ENGINE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 QQ="$ENGINE/qq"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-# Fixtures live under mktemp (= /tmp), which the default QQ_BIND_EXCLUDE_ROOTS covers —
-# neutralize suite-wide so every case keeps exercising extraction; the exclude-roots case
+# Fixtures live under mktemp (= $TMPDIR, /tmp only when the caller leaves it unset), so they
+# may or may not sit under the default QQ_BIND_EXCLUDE_ROOTS — neutralize suite-wide so every case keeps exercising extraction; the exclude-roots case
 # below re-enables the default explicitly.
 export QQ_BIND_EXCLUDE_ROOTS=
 fail=0; pass=0
@@ -189,7 +189,11 @@ QQ_BIND=1 "$QQ" update T "unconfigured gateway:/etc/tor/torrc mention" >/dev/nul
   && ok "D4: unconfigured host:path stays entirely unbound and silent" || no "D4: unconfigured host bound/warned"
 
 # ---- D6: exclude-roots hygiene (registry default back in force for these) -------------------------
-D6FILE="$TMP/d6-artifact.txt"; printf 'x\n' > "$D6FILE"
+# The fixture is planted under /tmp by the test itself (a default-excluded root), never under
+# the caller's TMPDIR, so the row reads the same wherever TMPDIR points. D6_FIXTURE_DIR
+# overrides the directory (positive control: a non-excluded dir must turn the row red).
+D6DIR="$(TMPDIR=/tmp mktemp -d)"; trap 'rm -rf "$TMP" "$D6DIR"' EXIT
+D6FILE="${D6_FIXTURE_DIR:-$D6DIR}/d6-artifact.txt"; printf 'x\n' > "$D6FILE"
 env -u QQ_BIND_EXCLUDE_ROOTS QQ_BIND=1 "$QQ" update T "example /run/systemd churned; scratch at $D6FILE" \
   >/dev/null 2>"$TMP/d6.err"
 ! grep -q '/run/systemd' "$REFS" && ! grep -q "d6-artifact" "$REFS" \

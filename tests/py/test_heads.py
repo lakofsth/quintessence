@@ -140,6 +140,27 @@ def _real_store_files():
         sorted(glob.glob(os.path.join(REAL_STORE, "journal", "*", "*.md")))
 
 
+def _readable_store_texts():
+    """Read every real-store file once; return ([(path, text)], [unreadable paths]).
+
+    A file this account cannot open is NOT evidence about heads.parse/serialize — it is a
+    fact about the account. Unattended runs read the real store as a non-owner ever since
+    the queue pinned QUINTESSENCE_DIR=~/quintessence for the worker uid (the
+    store holds owner-only mode-600 HEADs), and an unguarded open there raised
+    PermissionError, which the ABSOLUTE-GREEN landing gate reads as a red of the branch
+    under test. So: unreadable files leave the population with a printed count rather than
+    raising, and a run that could read NOTHING skips and says so. The parity assertion
+    itself is unchanged for any account that can read the whole store."""
+    texts, blocked = [], []
+    for f in _real_store_files():
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                texts.append((f, fh.read()))
+        except OSError:
+            blocked.append(f)
+    return texts, blocked
+
+
 class TestRealStoreRoundTrip(unittest.TestCase):
     # NOTE (P6 fix): the skip condition checks for actual HEAD/journal content, not just
     # directory EXISTENCE — a freshly `qq init`-ed store (e.g. a fresh install's own
@@ -151,11 +172,17 @@ class TestRealStoreRoundTrip(unittest.TestCase):
     @unittest.skipUnless(_real_store_files(), "no real HEAD/journal content on this machine "
                          "(a fresh/empty store is a clean skip, not a failure)")
     def test_every_real_head_and_journal_snapshot_round_trips_losslessly(self):
-        files = _real_store_files()
+        texts, blocked = _readable_store_texts()
+        if not texts:
+            self.skipTest(f"none of the {len(blocked)} real-store file(s) is readable by "
+                          "this account (parity needs at least one readable HEAD)")
+        if blocked:
+            shown = ", ".join(os.path.relpath(b, REAL_STORE) for b in blocked[:5])
+            print(f"NOTE: {len(blocked)}/{len(texts) + len(blocked)} real-store file(s) "
+                  f"unreadable by this account, excluded from the round-trip population: "
+                  f"{shown}{' ...' if len(blocked) > 5 else ''}")
         failures = []
-        for f in files:
-            with open(f, encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
+        for f, text in texts:
             h1 = heads.parse(text)
             s1 = h1.serialize()
             if s1 != text:

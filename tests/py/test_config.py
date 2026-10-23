@@ -11,7 +11,7 @@ import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from quintessence.config import Config, KEYS, KEYS_BY_NAME, ValidationResult, _is_temp_path
+from quintessence.config import Config, ConfigError, KEYS, KEYS_BY_NAME, ValidationResult, _is_temp_path
 
 
 class TestKeysRegistry(unittest.TestCase):
@@ -283,6 +283,35 @@ class TestWithOverrides(unittest.TestCase):
         base_cfg.with_overrides(QQ_KB_ROOT="/b")
         self.assertEqual(base_cfg.get_path("QQ_KB_ROOT"), "/a")
 
+
+
+class TestTypedIntegerGrammar(unittest.TestCase):
+    """A typed integer read from configuration is ASCII decimal digits and nothing else (D893)."""
+    def cfg(self, **env):
+        return Config(env=dict(env, HOME="/synthetic"), config_file="/nonexistent")
+
+    def test_ascii_digits_accepted(self):
+        self.assertEqual(self.cfg(QQ_LOCK_WAIT="5").get("QQ_LOCK_WAIT"), 5)
+        self.assertEqual(self.cfg(QQ_LOCK_WAIT="007").get("QQ_LOCK_WAIT"), 7)
+
+    def test_int_wider_spellings_refused_with_field_named(self):
+        for bad in ("1_000", "+7", "\u0663", " 5", "5 ", "-1", "", "1.5", "\u00b2"):
+            with self.subTest(raw=bad):
+                with self.assertRaises(ConfigError) as cm:
+                    self.cfg(QQ_LOCK_WAIT=bad).get("QQ_LOCK_WAIT")
+                self.assertIn("QQ_LOCK_WAIT", str(cm.exception))
+
+    def test_every_int_key_refuses_underscores(self):
+        for k in KEYS:
+            if k.type == "int":
+                with self.subTest(key=k.name):
+                    with self.assertRaises(ConfigError):
+                        self.cfg(**{k.name: "1_0"}).get(k.name)
+
+    def test_only_num_gpu_admits_a_leading_minus(self):
+        self.assertEqual(self.cfg(QQ_EMBED_NUM_GPU="-1").get("QQ_EMBED_NUM_GPU"), -1)
+        with self.assertRaises(ConfigError):
+            self.cfg(QQ_EMBED_NUM_GPU="+1").get("QQ_EMBED_NUM_GPU")
 
 if __name__ == "__main__":
     unittest.main()

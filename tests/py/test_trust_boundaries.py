@@ -24,7 +24,7 @@ import urllib.request
 ENGINE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ENGINE)
 
-from quintessence import admin, atomicio, authgate, httpdirect, mcpedge  # noqa: E402
+from quintessence import admin, atomicio, authgate, httpdirect, mcpedge, remoteauth  # noqa: E402
 from quintessence import write as writemod  # noqa: E402
 from quintessence.cli import render_fact, render_findings_next  # noqa: E402
 from quintessence.config import Config  # noqa: E402
@@ -425,7 +425,7 @@ class TestDirectHttp(unittest.TestCase):
     def test_no_stock_urlopen_outside_httpdirect(self):
         hits = []
         for p in glob.glob(os.path.join(ENGINE, "quintessence", "*.py")):
-            if os.path.basename(p) == "httpdirect.py":
+            if os.path.basename(p) == "httpdirect.py":   # population-claim-check: claim narrowed to this population
                 continue
             src = open(p, encoding="utf-8").read()
             if re.search(r"urllib\.request\.urlopen\(", src):
@@ -454,21 +454,7 @@ class TestRemoteFace(unittest.TestCase):
         self.assertGreaterEqual(src.count("clamp_k("), 2)
 
     def test_asgi_gate_forwards_lifespan_and_closes_everything_else(self):
-        """The gate lives inline in qq-remote-mcp in this tree: pull `auth_wrapper` out of the
-        script's namespace (fake mcp/uvicorn modules, as the policy-wiring test does)."""
         import asyncio
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "remote_wiring", os.path.join(ENGINE, "tests", "py", "test_remote_mcp_policy_wiring.py"))
-        wiring = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(wiring)
-        with tempfile.TemporaryDirectory() as home:
-            ns = wiring._exec_qq_remote_mcp(home, wiring._fixture_env(home)) if hasattr(wiring, "_fixture_env") \
-                else wiring._exec_qq_remote_mcp(home, {
-                    "HOME": home, "PATH": os.environ.get("PATH", ""),
-                    "QQ_CONFIG": os.path.join(home, "config"), "QQ_STATE_DIR": os.path.join(home, "state"),
-                    "QQ_MEMDIR": os.path.join(home, "mem"), "QQ_KB_ROOT": os.path.join(home, "kb"),
-                    "QUINTESSENCE_DIR": os.path.join(home, "quintessence")})
         seen: list = []
         sent: list = []
 
@@ -481,7 +467,7 @@ class TestRemoteFace(unittest.TestCase):
         async def receive():
             return {}
 
-        w = ns["auth_wrapper"](app, {"tok": "full"})
+        w = remoteauth.auth_wrapper(app, {"tok": "full"})
         asyncio.run(w({"type": "lifespan"}, receive, send))
         asyncio.run(w({"type": "websocket", "headers": [], "path": "/mcp"}, receive, send))
         asyncio.run(w({"type": "other"}, receive, send))
@@ -523,6 +509,45 @@ class TestReadyCommands(unittest.TestCase):
             tail = out.split("to resolve:")[-1]
             self.assertIn("qq update sec-topic", tail)
             self.assertNotIn("qq delete", tail)
+
+    def test_proposed_write_offers_every_gated_verb(self):
+        # The verb set is derived from the producer: every _gate_divert call site in write.py.
+        tree = ast.parse(open(os.path.join(ENGINE, "quintessence", "write.py")).read())
+        sites = {n.args[1].value for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_gate_divert"
+                 and isinstance(n.args[1], ast.Constant)}
+        self.assertEqual(sites, set(authgate.GATED_VERBS))
+        self.assertTrue({"new", "essence"} <= sites)
+        with tempfile.TemporaryDirectory() as base:
+            cfg = _cfg(base)
+            os.makedirs(cfg.get_path("QUINTESSENCE_DIR"))
+            store = Store(cfg)
+            for verb in sorted(sites):
+                line = (f"- [PROPOSED write] 2026-10-08T00:00:00Z HEAD sec-topic via `qq {verb} sec-topic` "
+                        "by model claude-sonnet-4-5 – pending ratification: a trusted session replays the "
+                        "JSON-decoded text through that verb, then deletes this line; text: "
+                        + json.dumps("x"))
+                ff = FindingsFile()
+                ff.set_section("PROPOSED-WRITES", [line])
+                tail = render_findings_next(store, cfg, ff).split("to resolve:")[-1]
+                self.assertIn(f"qq {verb} sec-topic", tail, verb)
+
+    def test_proposed_write_with_unsafe_head_offers_no_command(self):
+        with tempfile.TemporaryDirectory() as base:
+            cfg = _cfg(base)
+            os.makedirs(cfg.get_path("QUINTESSENCE_DIR"))
+            store = Store(cfg)
+            head = "sec-$(touch${IFS}pwned);x"
+            line = (f"- [PROPOSED write] 2026-10-08T00:00:00Z HEAD {head} via `qq update {head}` "
+                    "by model claude-sonnet-4-5 – pending ratification: a trusted session replays the "
+                    "JSON-decoded text through that verb, then deletes this line; text: "
+                    + json.dumps("x"))
+            ff = FindingsFile()
+            ff.set_section("PROPOSED-WRITES", [line])
+            out = render_findings_next(store, cfg, ff)
+            tail = out.split("to resolve:")[-1]
+            self.assertNotIn("$(", tail)
+            self.assertNotIn("qq update", tail)
 
 
 # ---- scaffold-never-replaces-a-foreign-hook -------------------------------------------------------

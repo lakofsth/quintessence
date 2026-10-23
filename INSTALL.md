@@ -41,9 +41,10 @@ This repo is a Claude Code plugin (`.claude-plugin/plugin.json` + `hooks/hooks.j
 skills: `/quintessence` and `/wrap`). `/wrap` is a session-end sweep (finalize HEADs, run the
 consistency check, verify/commit the session's work) that pairs with `/quintessence`'s
 write-as-you-work capture; `bash setup.sh --wire-claude` also symlinks both skills into
-`~/.claude/skills` for Option B (manual wiring) installs. The plugin bundles six hooks so you
+`~/.claude/skills` for Option B (manual wiring) installs. The plugin bundles seven hooks so you
 don't hand-edit `settings.json`: SessionStart contract injection, resume (UserPromptSubmit) /
-prederive (PreToolUse) / finalize (Stop), a PreCompact nudge (capture a HEAD before lossy
+prederive (PreToolUse) / finalize (Stop), an idle-checkpoint autosave (Stop, async –
+see [below](#idle-checkpoint-autosave)), a PreCompact nudge (capture a HEAD before lossy
 context compaction), and a
 SessionEnd `memory-commit` (commits the atomic-fact memory store if it changed – a local
 commit only; pushing to an off-box mirror is a deployment-specific extension you add after
@@ -73,7 +74,7 @@ Easiest: `bash setup.sh --wire-claude` does this idempotently. It repoints a dri
 qq hook, adds a missing one, and leaves every non-qq hook untouched, backing up `settings.json`
 before any change. Re-running changes only what has drifted, and names each hook it changes; if
 there is nothing to do it says so in one line. It
-manages exactly the four qq hooks below; SessionStart is wired to `hooks/inject-contract.sh` (so the
+manages exactly the five qq hooks below (the fifth, `idle-autosave.sh`, is described under [Idle-checkpoint autosave](#idle-checkpoint-autosave)); SessionStart is wired to `hooks/inject-contract.sh` (so the
 [optional seams](#optional-local-seams-personalize-without-forking) apply). The optional
 `PreCompact` (`precompact-nudge.sh`) and `SessionEnd` (`memory-commit.sh`) hooks are not
 auto-wired here – add them by hand if you want them under Option B (the plugin bundles them), so
@@ -100,7 +101,10 @@ seams](#optional-local-seams-personalize-without-forking):
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "<QQ_HOME>/prederive-recall.sh" } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "<QQ_HOME>/finalize-check.sh" } ] }
+      { "hooks": [ { "type": "command", "command": "<QQ_HOME>/finalize-check.sh" } ] },
+      { "hooks": [ { "type": "command", "command": "<QQ_HOME>/idle-autosave.sh",
+        "timeout": 3600, "async": true, "asyncRewake": true,
+        "rewakeMessage": "Idle-checkpoint (auto):" } ] }
     ]
   }
 }
@@ -112,6 +116,27 @@ seams](#optional-local-seams-personalize-without-forking):
 - **`prederive-recall.sh`** nudges you to check for an existing runbook before reinventing one.
 - **`finalize-check.sh`** fires on the Stop event, snapshots an unsaved HEAD, and refreshes
   the pending findings (`qq check --write`).
+
+- **`idle-autosave.sh`** – see below.
+
+### Idle-checkpoint autosave
+
+`idle-autosave.sh` is an async Stop hook (`async` + `asyncRewake`). After each turn it arms a
+background timer for that session. If the session's transcript then stays continuously quiet for
+`QQ_IDLE_AUTOSAVE_DELAY` seconds (default **3000**) and the session has had genuine new activity
+since its last checkpoint, the hook exits 2 and the session is woken with a short instruction to
+capture its synthesis into a HEAD (`qq update` / `qq finalize`) while its context is still in view
+and the prompt cache is still warm. It never wakes a session with nothing new to save, and a
+woken turn adds no genuine activity, so it cannot loop. A newer arm supersedes the older timer of
+the same session (by stored PID); sessions do not interfere with each other.
+
+Why 3000 s and not the 3600 s cache TTL: Claude Code's idle compaction fired at 54m19s–55m24s of
+quiet in all 24 measured records (2026-10-23), and its transcript write resets this hook's quiet
+clock, so a 3300 s delay lost that race 22 of 24 times. The hook entry's `timeout` (3600) must
+stay above the delay. Knobs, all registered in [CONFIG.md](CONFIG.md): `QQ_IDLE_AUTOSAVE_DELAY`,
+`QQ_IDLE_AUTOSAVE_POLL`, `QQ_IDLE_AUTOSAVE_STATE`, and `QQ_IDLE_AUTOSAVE_DISABLE=1` to turn it off.
+It needs `jq` and `python3` (the latter only to tell a real `qq update` from one quoted in an
+argument).
 
 > Option A (the plugin) does this same wiring in one step. Keep `CONTRACT.md` in sync with the
 > installed `qq` – it hard-codes the verb names; `qq doctor` flags a version mismatch.

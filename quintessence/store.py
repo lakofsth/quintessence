@@ -167,7 +167,7 @@ class Store:
             return []
         out = []
         for p in sorted(self.memdir.glob("*.md"), key=lambda p: _locale_sort_key(p.name)):
-            if p.stem == "MEMORY":
+            if p.stem == "MEMORY":   # population-claim-check: not a completeness claim
                 continue
             out.append(p.stem)
         return out

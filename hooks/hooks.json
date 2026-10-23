@@ -1,5 +1,5 @@
 {
-  "description": "Quintessence continuity wiring: inject the operational contract at session start, surface threshold-gated matching HEADs/memory on a prompt, nudge runbook-recall before infra commands, run a finalize safety-net at stop, nudge a HEAD capture before context compaction, and commit the memory store at session end. All hooks are silent no-ops on failure and never block.",
+  "description": "Quintessence continuity wiring: inject the operational contract at session start, surface threshold-gated matching HEADs/memory on a prompt, nudge runbook-recall before infra commands, run a finalize safety-net at stop, nudge a HEAD capture before context compaction, wake a session that has gone quiet to checkpoint its synthesis before idle compaction and the prompt-cache edge, and commit the memory store at session end. All hooks are silent no-ops on failure and never block.",
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/inject-contract.sh\"" } ] }
@@ -11,7 +11,8 @@
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/prederive-recall.sh\"" } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/finalize-check.sh\"" } ] }
+      { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/finalize-check.sh\"" } ] },
+      { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/idle-autosave.sh\"", "timeout": 3600, "async": true, "asyncRewake": true, "rewakeMessage": "Idle-checkpoint (auto):" } ] }
     ],
     "PreCompact": [
       { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/precompact-nudge.sh\"" } ] }

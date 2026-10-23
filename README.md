@@ -95,7 +95,7 @@ qq doctor                               # check deps / store / embedder
 A fresh model has no prior familiarity with qq, so a small always-injected contract
 teaches each session how to drive the store: how to resume and recall, which verb to write
 with, what belongs in a thread versus a fact. For Claude Code that is either the bundled
-plugin or four hooks wired by `setup.sh --wire-claude` – see [INSTALL.md](INSTALL.md).
+plugin or five hooks wired by `setup.sh --wire-claude` – see [INSTALL.md](INSTALL.md).
 [ONBOARDING.md](ONBOARDING.md) is how to drive it day to day.
 
 ## Everyday use

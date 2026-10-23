@@ -4,13 +4,16 @@
 + its "nothing relevant" refusal path (never applied to keyword-fallback hits), the redaction
 ladder (unchanged from qqask_core.filter_redacted), and the no-completion-endpoint degrade
 path (degrade behaviour preserved)."""
+import json
 import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from quintessence import ask as ask_module
 from quintessence.config import Config
 from quintessence.ask import Ask, render, RETRIEVAL_DEGRADED_WARNING
 
@@ -525,3 +528,327 @@ class AskEscapeHatchReachesSearch20260729(unittest.TestCase):
     def test_ask_still_constructible_without_a_search_index(self):
         cfg = Config(env={"QQ_ASK_UNREDACTED": "1"}, config_file="/nonexistent")
         self.assertTrue(Ask(cfg, None).unredacted)   # must not raise
+
+
+class _FakeResponse:
+    """Stand-in for urlopen's context manager. Carries a status (probe reads it) and a body
+    (the completion reads it), so ONE fake serves both call sites without branching."""
+    def __init__(self, status=200, payload=None):
+        self.status = status
+        self._payload = json.dumps(payload or {
+            "choices": [{"message": {"content": "an answer [1]"}}]}).encode()
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestPerEndpointModelNaming(unittest.TestCase):
+    """An endpoint that SELECTS a model by name (ollama) needs two things a llama-server
+    endpoint does not: the model named in the body, and a health probe it actually serves.
+    Both are keyed off QQ_ASK_MODELS, so an unnamed endpoint must be untouched — that is what
+    keeps the resident-llama-server tiers behaving exactly as before."""
+
+    OLLAMA = "http://127.0.0.1:11434"
+    LLAMA = "http://127.0.0.1:8095"
+    MODELS = f"{OLLAMA}=qwen3:4b-instruct"
+
+    def _asker(self, base, **over):
+        return make_ask(base, [], QQ_ASK_MODELS=self.MODELS, **over)
+
+    def test_named_endpoint_is_probed_where_ollama_answers(self):
+        # ollama serves /v1/models and 404s /health, so probing /health would mark a healthy
+        # on-demand tier as down and the ladder would silently fall past it. The fake serves a
+        # list CONTAINING the configured model because the probe now reads that list rather
+        # than the status alone; what this test pins is still which PATH is asked.
+        with tempfile.TemporaryDirectory() as base:
+            asker = self._asker(base)
+            seen = []
+
+            def fake_urlopen(url, timeout=None):
+                seen.append(url)
+                return _FakeResponse(status=200,
+                                     payload={"data": [{"id": "qwen3:4b-instruct"}]})
+
+            with unittest.mock.patch.object(ask_module.httpdirect, "urlopen", fake_urlopen):
+                self.assertTrue(asker.probe_endpoint(self.OLLAMA))
+            self.assertEqual(seen, [f"{self.OLLAMA}/v1/models"])
+
+    def test_unnamed_endpoint_still_probed_at_health(self):
+        # llama-server answers /health 503 WHILE LOADING; that is how the ladder skips a tier
+        # that is not ready. Probing /v1/models there would pick a server mid-load.
+        with tempfile.TemporaryDirectory() as base:
+            asker = self._asker(base)
+            seen = []
+
+            def fake_urlopen(url, timeout=None):
+                seen.append(url)
+                return _FakeResponse(status=200)
+
+            with unittest.mock.patch.object(ask_module.httpdirect, "urlopen", fake_urlopen):
+                self.assertTrue(asker.probe_endpoint(self.LLAMA))
+            self.assertEqual(seen, [f"{self.LLAMA}/health"])
+
+    def test_named_endpoint_sends_the_model_name(self):
+        with tempfile.TemporaryDirectory() as base:
+            asker = self._asker(base)
+            sent = {}
+
+            def fake_urlopen(req, timeout=None):
+                sent.update(json.loads(req.data.decode()))
+                return _FakeResponse()
+
+            with unittest.mock.patch.object(ask_module.httpdirect, "urlopen", fake_urlopen):
+                asker._complete(self.OLLAMA, "q", "evidence")
+            self.assertEqual(sent.get("model"), "qwen3:4b-instruct")
+
+    def test_unnamed_endpoint_sends_no_model_key(self):
+        # Not a placeholder: a name an endpoint does not have is a 404, which the ladder reads
+        # as "healthy but the completion failed" and gives up on rather than stepping down.
+        with tempfile.TemporaryDirectory() as base:
+            asker = self._asker(base)
+            sent = {}
+
+            def fake_urlopen(req, timeout=None):
+                sent.update(json.loads(req.data.decode()))
+                return _FakeResponse()
+
+            with unittest.mock.patch.object(ask_module.httpdirect, "urlopen", fake_urlopen):
+                asker._complete(self.LLAMA, "q", "evidence")
+            self.assertNotIn("model", sent)
+
+    def test_naming_a_model_leaves_that_endpoint_budget_alone(self):
+        # The seam: budgets are keyed by the endpoint URL. Carrying the model in its own key
+        # (rather than decorating the endpoint string) is what keeps that lookup intact.
+        with tempfile.TemporaryDirectory() as base:
+            asker = self._asker(base, QQ_ASK_BUDGETS=f"{self.OLLAMA}=8000")
+            self.assertEqual(asker._budget_for(self.OLLAMA), 8000)
+            self.assertEqual(asker.models[self.OLLAMA], "qwen3:4b-instruct")
+
+
+class TestSlotPinning(unittest.TestCase):
+    """`id_slot` names WHICH slot of a resident multi-slot llama-server serves this request.
+    Unpinned, the server places the request on whichever slot it likes — slot 0 on an idle
+    server, which is the slot HA voice is pinned to and the only slot `ha-model-router` asks
+    about when it decides the backend is busy. So a `qq ask` landing there makes a voice
+    question wait behind a 200k-character evidence pack, or be sent to the 4B floor with the
+    125B loaded and idle (measured 2026-09-10: a trivial voice question answered after 32s).
+
+    The other direction matters just as much: llama-server REFUSES a request naming a slot it
+    does not have, and `ask` reads a refusal as "this rung failed" and steps down the ladder.
+    So a value that is not a slot number must send nothing at all rather than something
+    approximate — an endpoint whose config carries a typo must behave exactly like an endpoint
+    with no slot configured, not like a rung that is down."""
+
+    RESIDENT = "http://127.0.0.1:8090"
+    OTHER = "http://127.0.0.1:11434"
+
+    def _sent_body(self, asker, endpoint):
+        sent = {}
+
+        def fake_urlopen(req, timeout=None):
+            sent.update(json.loads(req.data.decode()))
+            return _FakeResponse()
+
+        with unittest.mock.patch.object(ask_module.httpdirect, "urlopen", fake_urlopen):
+            asker._complete(endpoint, "q", "evidence")
+        return sent
+
+    def test_endpoint_with_a_slot_sends_it(self):
+        with tempfile.TemporaryDirectory() as base:
+            asker = make_ask(base, [], QQ_ASK_SLOTS=f"{self.RESIDENT}=1")
+            self.assertEqual(self._sent_body(asker, self.RESIDENT).get("id_slot"), 1)
+
+    def test_the_slot_goes_on_the_wire_as_a_number_not_a_string(self):
+        # llama-server parses `id_slot` as an integer; a quoted "1" is a type error there, and
+        # the request is refused exactly like a slot that does not exist. The config value
+        # arrives as text, so the conversion is the whole point of this assertion.
+        with tempfile.TemporaryDirectory() as base:
+            asker = make_ask(base, [], QQ_ASK_SLOTS=f"{self.RESIDENT}=1")
+            self.assertIsInstance(self._sent_body(asker, self.RESIDENT).get("id_slot"), int)
+
+    def test_slot_zero_is_sent_rather_than_dropped_as_falsy(self):
+        # 0 is a real slot — the voice slot — not "no slot". A presence test written as
+        # `if slot:` instead of `if slot is not None:` drops it silently, and the endpoint
+        # then behaves as if it had never been configured.
+        with tempfile.TemporaryDirectory() as base:
+            asker = make_ask(base, [], QQ_ASK_SLOTS=f"{self.RESIDENT}=0")
+            self.assertEqual(self._sent_body(asker, self.RESIDENT).get("id_slot"), 0)
+
+    def test_endpoint_without_a_slot_sends_no_such_key(self):
+        with tempfile.TemporaryDirectory() as base:
+            asker = make_ask(base, [], QQ_ASK_SLOTS=f"{self.RESIDENT}=1")
+            self.assertNotIn("id_slot", self._sent_body(asker, self.OTHER))
+
+    def test_no_slots_configured_at_all_sends_no_such_key(self):
+        with tempfile.TemporaryDirectory() as base:
+            asker = make_ask(base, [])
+            self.assertNotIn("id_slot", self._sent_body(asker, self.RESIDENT))
+
+    def test_a_malformed_value_sends_no_such_key(self):
+        # Each of these is a plausible hand-edit of the config line. None of them is a slot
+        # number, and the requirement is the same for all: send nothing, so the rung answers
+        # normally instead of being refused and read as down. "-1" is llama-server's own
+        # "any slot" sentinel and is deliberately NOT honoured here — this key exists to pin a
+        # slot, and a config that fails to name one has not pinned anything. "²" is here
+        # because `str.isdigit()` accepts it while `int()` raises on it: a guard written with
+        # isdigit alone crashes `ask` at construction rather than ignoring the entry.
+        for value in ("one", "", "1.5", "-1", "1 2", "²", "0x1"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as base:
+                asker = make_ask(base, [], QQ_ASK_SLOTS=f"{self.RESIDENT}={value}")
+                self.assertNotIn("id_slot", self._sent_body(asker, self.RESIDENT))
+
+    def test_pinning_a_slot_leaves_that_endpoints_other_per_endpoint_settings_alone(self):
+        # The seam: budgets and model names are keyed by the endpoint URL too. Carrying the
+        # slot in its own key, rather than decorating the endpoint string, is what keeps those
+        # lookups intact — the same reason QQ_ASK_MODELS is its own key.
+        with tempfile.TemporaryDirectory() as base:
+            asker = make_ask(base, [], QQ_ASK_SLOTS=f"{self.RESIDENT}=1",
+                             QQ_ASK_BUDGETS=f"{self.RESIDENT}=8000",
+                             QQ_ASK_MODELS=f"{self.RESIDENT}=some-model")
+            self.assertEqual(asker._budget_for(self.RESIDENT), 8000)
+            self.assertEqual(asker._model_for(self.RESIDENT), "some-model")
+            self.assertEqual(asker._slot_for(self.RESIDENT), 1)
+
+    def test_a_pinned_endpoint_is_still_probed_at_health(self):
+        # Pinning a slot says nothing about which model the server serves, so it must not
+        # move the endpoint onto the /v1/models probe the way naming a model does. A resident
+        # llama-server answers /health 503 while loading, and that is how the ladder skips a
+        # tier that is not ready yet.
+        with tempfile.TemporaryDirectory() as base:
+            asker = make_ask(base, [], QQ_ASK_SLOTS=f"{self.RESIDENT}=1")
+            seen = []
+
+            def fake_urlopen(url, timeout=None):
+                seen.append(url)
+                return _FakeResponse(status=200)
+
+            with unittest.mock.patch.object(ask_module.httpdirect, "urlopen", fake_urlopen):
+                self.assertTrue(asker.probe_endpoint(self.RESIDENT))
+            self.assertEqual(seen, [f"{self.RESIDENT}/health"])
+
+
+class TestPerEndpointDirectives(unittest.TestCase):
+    """Quantifies over the derivation rather than over the two directives that exist today.
+    `Ask._BODY_DIRECTIVES` is the one table `_complete` builds the body by walking, so a third
+    directive added tomorrow is held to the same rule by this test without anyone remembering
+    to come back and add it here."""
+
+    ENDPOINT = "http://127.0.0.1:8090"
+
+    def test_the_table_is_the_one_account_and_every_accessor_exists(self):
+        self.assertTrue(Ask._BODY_DIRECTIVES, "no per-endpoint directives declared")
+        for key, accessor in Ask._BODY_DIRECTIVES:
+            with self.subTest(directive=key):
+                self.assertTrue(callable(getattr(Ask, accessor, None)),
+                                f"{key} names accessor {accessor!r}, which is not a method")
+
+    def test_every_directive_is_absent_when_config_names_none(self):
+        # The general form of "a wrong directive is a refused request": with nothing
+        # configured for an endpoint, the body must carry none of these keys at all — not a
+        # default, not a zero, not an empty string.
+        with tempfile.TemporaryDirectory() as base:
+            asker = make_ask(base, [])
+            sent = {}
+
+            def fake_urlopen(req, timeout=None):
+                sent.update(json.loads(req.data.decode()))
+                return _FakeResponse()
+
+            with unittest.mock.patch.object(ask_module.httpdirect, "urlopen", fake_urlopen):
+                asker._complete(self.ENDPOINT, "q", "evidence")
+            for key, _ in Ask._BODY_DIRECTIVES:
+                with self.subTest(directive=key):
+                    self.assertNotIn(key, sent)
+
+
+class TestWholeNumberValueSpellings(unittest.TestCase):
+    """`url=<whole number>` entries are read ONLY when the value is spelled in plain ASCII
+    digits; every other spelling is ignored exactly like any other malformed entry, leaving
+    the endpoint unconfigured.
+
+    The gap this pins: `int()`'s grammar is wider than "whole number". It accepts digit
+    separators ("1_0" -> 10), a leading sign ("+1" -> 1; "-0" -> 0, which then survives a
+    `>= 0` guard), and every Unicode decimal digit (U+0663 -> 3, fullwidth one -> 1). A
+    config line whose value only a Python cast recognises has not named a whole number, and
+    honouring it puts a number on the wire that the operator never wrote — a slot the
+    request never meant to pin, a budget the config never named. The failure the operator
+    meets: the endpoint is served on the wrong slot / with the wrong pack size, silently.
+
+    Quantified over BOTH keys shaped this way (QQ_ASK_SLOTS, QQ_ASK_BUDGETS): one
+    recognition point parses both, so the sentence is one rule with two surfaces and a
+    check on one key alone would leave the other unpinned.
+
+    Directions pinned here:
+      1. each non-plain-digit spelling leaves the endpoint unconfigured (slots: no `id_slot`
+         on the wire; budgets: the unconfigured default), for both keys;
+      2. plain ASCII digits ARE read — "1" and "0", including that 0 is a real value for
+         both keys and not dropped as falsy;
+      3. a bogus entry is ignored like any other malformed one: no crash at construction,
+         and the other entries of the same list are still read."""
+
+    PINNED_URL = "http://127.0.0.1:99"   # not in the _BUDGET defaults: unconfigured == _DEFAULT_BUDGET
+    OTHER_URL = "http://127.0.0.1:98"
+
+    BOGUS_SPELLINGS = ("1_0", "+1", "-0", "\u0663", "\uff11", "\u00b2", "-1", "1e3")
+    WHOLE_NUMBER_KEYS = ("QQ_ASK_SLOTS", "QQ_ASK_BUDGETS")
+
+    def _sent_body(self, asker, endpoint):
+        sent = {}
+
+        def fake_urlopen(req, timeout=None):
+            sent.update(json.loads(req.data.decode()))
+            return _FakeResponse()
+
+        with unittest.mock.patch.object(ask_module.httpdirect, "urlopen", fake_urlopen):
+            asker._complete(endpoint, "q", "evidence")
+        return sent
+
+    def _assert_unconfigured(self, asker, url, key, msg):
+        if key == "QQ_ASK_SLOTS":
+            self.assertIsNone(asker._slot_for(url), msg)
+            self.assertNotIn("id_slot", self._sent_body(asker, url), msg)
+        else:
+            self.assertEqual(asker._budget_for(url), ask_module._DEFAULT_BUDGET, msg)
+
+    def test_bogus_spellings_leave_the_endpoint_unconfigured(self):
+        for key in self.WHOLE_NUMBER_KEYS:
+            for value in self.BOGUS_SPELLINGS:
+                with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as base:
+                    asker = make_ask(base, [], **{key: f"{self.PINNED_URL}={value}"})
+                    self._assert_unconfigured(
+                        asker, self.PINNED_URL, key,
+                        f"{key}={value!r}: a value only int() recognises must not be read")
+
+    def test_plain_ascii_digits_are_read(self):
+        for key in self.WHOLE_NUMBER_KEYS:
+            for value in ("1", "0"):
+                with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as base:
+                    asker = make_ask(base, [], **{key: f"{self.PINNED_URL}={value}"})
+                    if key == "QQ_ASK_SLOTS":
+                        self.assertEqual(asker._slot_for(self.PINNED_URL), int(value))
+                        sent = self._sent_body(asker, self.PINNED_URL)
+                        self.assertEqual(sent.get("id_slot"), int(value))
+                    else:
+                        self.assertEqual(asker._budget_for(self.PINNED_URL), int(value))
+
+    def test_a_bogus_entry_is_ignored_like_any_other_malformed_entry(self):
+        # The list survives: a bad line is skipped, not fatal, and does not shadow the
+        # well-formed entries beside it.
+        for key in self.WHOLE_NUMBER_KEYS:
+            for value in self.BOGUS_SPELLINGS:
+                with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as base:
+                    asker = make_ask(base, [],
+                                     **{key: f"{self.PINNED_URL}=1,{self.OTHER_URL}={value}"})
+                    if key == "QQ_ASK_SLOTS":
+                        self.assertEqual(asker._slot_for(self.PINNED_URL), 1)
+                    else:
+                        self.assertEqual(asker._budget_for(self.PINNED_URL), 1)
+                    self._assert_unconfigured(
+                        asker, self.OTHER_URL, key,
+                        f"{key}: bogus {value!r} beside a good entry must be skipped, not fatal")

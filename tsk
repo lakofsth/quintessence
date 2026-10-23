@@ -42,9 +42,18 @@ stash_back(){   # $1 = job name — put a stashed previous result back where rea
   # signal traps (final-round finding: a signal landing between stash and restore used to
   # strand the previous result where only `clean` could reach it — as deletion, not
   # restore). After a successful start the stash is already discarded: no-op.
-  [ -f "$STATE/$1:prev.rc" ]   && mv -f "$STATE/$1:prev.rc"   "$STATE/$1.rc"
-  [ -f "$STATE/$1:prev.done" ] && mv -f "$STATE/$1:prev.done" "$STATE/$1.done"
-  return 0
+  # CHECKED, both mvs, the mirror of the checked forward stash in `run` (ledger D274): an
+  # unchecked restore left the previous result in :prev, where status/rc/wait do not look,
+  # and said nothing. Reported on stderr and returned, never `die`d: install_failed calls
+  # this before its own die, and its message is the one that says why the start failed.
+  local _bad=0 _x
+  for _x in rc done; do
+    [ -f "$STATE/$1:prev.$_x" ] || continue
+    mv -f "$STATE/$1:prev.$_x" "$STATE/$1.$_x" || {
+      echo "tsk: could not restore the previous result: it is still in $STATE/$1:prev.$_x" >&2
+      _bad=1; }
+  done
+  return $_bad
 }
 install_failed(){   # $1 = job name, $2 = message
   systemctl --user is-active --quiet "$(unit "$1")" || rm -f "$STATE/$1".{run,cmd}

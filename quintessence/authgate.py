@@ -84,6 +84,10 @@ from .atomicio import atomic_write_text
 from .findings import Finding, FindingsFile
 from .store import Store, state_lock
 
+# The write verbs the gate diverts (write._gate_divert asserts membership; cli's ready-command
+# gate derives its PROPOSED-write verbs from this, not from a hand-written list).
+GATED_VERBS = ("update", "new", "rewrite", "essence")
+
 SECTION = "PROPOSED-WRITES"
 
 

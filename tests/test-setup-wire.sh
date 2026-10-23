@@ -811,5 +811,74 @@ else
   ok "all $_launch_total installer launches across tests/*.sh carry --no-self-check"
 fi
 
+# --- a literal `~` in a path override means $HOME, never ./~ under the working directory -------
+# Ledger D92. `CLAUDE_SETTINGS='~/.claude/settings.json'` — quoted, so the shell never expanded it —
+# used to wire ./~/.claude/settings.json under whatever directory the installer was run from, say
+# "Done.", and leave the real settings unwired. The same shape held for every path override in the
+# `# Env overrides:` header, so the case sets ALL of them, derived from that line rather than
+# listed here, each at its own `~/tilde/<NAME>` path, and runs from an empty directory that must
+# stay empty. FOREGROUND, like the name-budget case, because the second half asserts on what the
+# installer SAYS; `timeout` bounds a version that hangs.
+_tcwd="$TMP/tilde-cwd"; mkdir -p "$_tcwd"
+_tvars=()
+for _v in $(sed -nE 's/^#[[:space:]]*Env overrides:[[:space:]]*//p' "$ENGINE/setup.sh"); do
+  _tvars+=("$_v=~/tilde/$_v")
+done
+_tout="$(cd "$_tcwd" && timeout 120 "${_ISOLATED_ENV[@]}" HERE="$ENGINE" "${_tvars[@]}" \
+          bash "$ENGINE/setup.sh" --wire-claude --no-self-check 2>&1)"; _trc=$?
+if [ "${#_tvars[@]}" -lt 5 ]; then
+  no "the Env overrides header yielded ${#_tvars[@]} names, not the five setup.sh documents — this case would be certifying a smaller set than it claims"
+elif [ -n "$(ls -A "$_tcwd")" ]; then
+  no "a literal-tilde override built paths under the working directory ($(ls -A "$_tcwd" | tr '\n' ' ')) — the operator's real install is untouched and the installer said: $(printf '%s' "$_tout" | tail -1)"
+elif [ "$_trc" -ne 0 ]; then
+  no "the installer refused or failed on literal-tilde overrides (rc=$_trc) instead of expanding them: $(printf '%s' "$_tout" | tail -3)"
+elif ! grep -q inject-contract "$HOME/tilde/CLAUDE_SETTINGS" 2>/dev/null \
+     || [ "$(readlink "$HOME/tilde/BIN_DIR/qq" 2>/dev/null)" != "$ENGINE/qq" ] \
+     || [ ! -d "$HOME/tilde/QUINTESSENCE_DIR" ] \
+     || ! grep -qx "QQ_MEMDIR=$HOME/tilde/QQ_MEMDIR" "$HOME/.config/quintessence/config" 2>/dev/null; then
+  no "literal-tilde overrides left the working directory empty but did not land under \$HOME/tilde either: $(cd "$HOME/tilde" 2>/dev/null && find . -maxdepth 2 | tr '\n' ' ')"
+else
+  ok "a literal ~ in every setup.sh path override is expanded against \$HOME, and nothing is built under the working directory"
+fi
+# `~user` names someone else's home; guessing it is not the installer's call, so it is refused,
+# loudly and before anything is built.
+rm -rf "$_tcwd"; mkdir -p "$_tcwd"
+_tout="$(cd "$_tcwd" && timeout 120 "${_ISOLATED_ENV[@]}" HERE="$ENGINE" \
+          CLAUDE_SETTINGS='~nosuchuser/.claude/settings.json' \
+          bash "$ENGINE/setup.sh" --wire-claude --no-self-check 2>&1)"; _trc=$?
+if [ "$_trc" -ne 0 ] && printf '%s' "$_tout" | grep -q 'CLAUDE_SETTINGS' && [ -z "$(ls -A "$_tcwd")" ]; then
+  ok "a ~user override is refused by name, and nothing is built under the working directory"
+else
+  no "a ~user override was not refused by name (rc=$_trc, cwd: $(ls -A "$_tcwd" | tr '\n' ' ')): $(printf '%s' "$_tout" | tail -1)"
+fi
+
+# ---- the idle-checkpoint Stop hook is wired with its async fields, idempotently ------------------
+# idle-autosave.sh only works as an async asyncRewake hook whose timeout exceeds its quiet delay; a
+# bare {type, command} entry would block every Stop for up to 50 minutes. Fresh wiring must carry
+# the fields, a second run must change nothing, and a hand-written entry lacking them must be
+# repaired key-by-key without losing a sibling key the operator added.
+mkdir -p "$TMP/idle/.claude"
+echo '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "bash /old/idle-autosave.sh", "statusMessage": "mine"}]}]}}' > "$TMP/idle/.claude/settings.json"
+_iout1="$(timeout 120 "${_ISOLATED_ENV[@]}" HERE="$ENGINE" CLAUDE_SETTINGS="$TMP/idle/.claude/settings.json" \
+           bash "$ENGINE/setup.sh" --wire-claude --no-self-check 2>&1)"
+_iout2="$(timeout 120 "${_ISOLATED_ENV[@]}" HERE="$ENGINE" CLAUDE_SETTINGS="$TMP/idle/.claude/settings.json" \
+           bash "$ENGINE/setup.sh" --wire-claude --no-self-check 2>&1)"
+if python3 - "$TMP/idle/.claude/settings.json" "$ENGINE" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+hs = [h for g in s["hooks"]["Stop"] for h in g["hooks"] if "idle-autosave.sh" in h["command"]]
+assert len(hs) == 1, hs
+h = hs[0]
+assert h["command"] == "bash " + sys.argv[2] + "/idle-autosave.sh", h["command"]
+assert h["async"] is True and h["asyncRewake"] is True and h["timeout"] == 3600, h
+assert h["rewakeMessage"] and h["statusMessage"] == "mine", h
+assert sum("finalize-check.sh" in x["command"] for g in s["hooks"]["Stop"] for x in g["hooks"]) == 1
+PY
+then ok "a hand-written idle-autosave entry is repointed and given async/asyncRewake/timeout/rewakeMessage, keeping its own keys"
+else no "the idle-autosave Stop entry was not wired with its async fields: $(printf '%s' "$_iout1" | tail -3)"; fi
+printf '%s' "$_iout2" | grep -q 'already wired' \
+  && ok "re-running --wire-claude after the idle-autosave wiring changes nothing" \
+  || no "second --wire-claude run was not a no-op: $(printf '%s' "$_iout2" | tail -3)"
+
 printf -- '----- %d passed, %d failed -----\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

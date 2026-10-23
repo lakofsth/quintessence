@@ -618,7 +618,7 @@ class SearchIndex:
         own = {self.cache_path, self._orphan_ages_path(), self.cache_path + ".lock",
                self.legacy_cache_path}
         for name in names:
-            if name.endswith(".lock"):
+            if name.endswith(".lock"):   # population-claim-check: not a completeness claim
                 continue   # HARD CONSTRAINT: never a lock file
             full = os.path.join(cache_dir, name)
             if full in own:

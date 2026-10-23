@@ -216,6 +216,43 @@ fi
 rm -f "$TSK_STATE/$J-keeplog".{log,rc,done,run,cmd} "$TSK_STATE/$J-keeplog":prev.{rc,done}
 rm -rf "$_h5stub"
 
+# H7 (hermetic). a restore that FAILS is said, not swallowed (ledger D274). H6 pins the restore
+#     when it works; this pins it when it does not. stash_back's two restore `mv`s used to run
+#     unchecked and `return 0` — the mirror of the CHECKED forward stash below them, hardened
+#     for exactly this reason by 91331eb — so a failed restore left the previous result in
+#     `:prev`, where `status` reports a completed job as unknown, and nothing said so.
+#     The failing restore is an `mv` stub that refuses only a `:prev` SOURCE and passes every
+#     other move to the real mv, so the forward stash and everything else run as they do in
+#     use; H6's cat stub then fails the start, which is what calls stash_back. (The sweep's
+#     probe used a read-only state dir instead; through the real tsk that makes the forward
+#     stash fail first, and a restore with nothing stashed proves nothing.)
+_h7stub="$TMP/h7stub"; mkdir -p "$_h7stub"
+_realmv="$(command -v mv)"
+{ cat <<'STUB'
+#!/bin/bash
+# inspects only the first non-option argument, i.e. the SOURCE
+for a; do
+  [ "$a" = -f ] && continue
+  case "$a" in *:prev.rc|*:prev.done) echo "mv: stub refuses $a" >&2; exit 1;; esac
+  break
+done
+STUB
+  printf 'exec %q "$@"\n' "$_realmv"; } > "$_h7stub/mv"
+printf '#!/bin/bash\nprintf "#!/usr/bin/env bash\\n"\nexit 1\n' > "$_h7stub/cat"
+chmod +x "$_h7stub/mv" "$_h7stub/cat"
+printf '0' > "$TSK_STATE/$J-restorefail.rc"; : > "$TSK_STATE/$J-restorefail.done"
+_h7out=$(PATH="$_h7stub:$PATH" "$TSK" run "$J-restorefail" -- true 2>&1); _h7rc=$?
+if [ ! -e "$TSK_STATE/$J-restorefail:prev.rc" ]; then
+  no "H7 never stashed the previous result, so stash_back had nothing to restore — the assertion below would be vacuous (rc=$_h7rc: $(printf '%s' "$_h7out" | tail -1))"
+elif [ "$_h7rc" -ne 0 ] && printf '%s' "$_h7out" | grep -q "could not restore the previous result" \
+     && printf '%s' "$_h7out" | grep -q "could not write runner script"; then
+  ok "a failed restore of the previous result is reported, beside the start failure that caused it"
+else
+  no "a failed restore stranded the previous result in :prev and said nothing (rc=$_h7rc, said: $(printf '%s' "$_h7out" | tr '\n' '|'))"
+fi
+rm -f "$TSK_STATE/$J-restorefail".{rc,done,run,cmd} "$TSK_STATE/$J-restorefail":prev.{rc,done}
+rm -rf "$_h7stub"
+
 if ! systemctl --user is-system-running >/dev/null 2>&1 && ! systemctl --user list-units >/dev/null 2>&1; then
   echo "SKIP: no systemd user manager on this host — the remaining assertions are manager-bound;"
   echo "      the $((pass+fail)) hermetic ones above (name charset, rc-file degradation) DID run."

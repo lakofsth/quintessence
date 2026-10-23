@@ -185,11 +185,19 @@ def _render_proc_drift(f: dict) -> str:
 # string keeps one-proposal-one-line, byte-exact recovery (parse_line decodes it back).
 # APPEND-only semantics (SALIENCE-like): no producer re-emits this section; an entry is
 # cleared only by adjudication (replay-then-delete, or delete = reject).
+#
+# The line names the channel its verb reads the text from (argv, stdin), because the verbs
+# differ and a replay on the wrong one can drop the text. INVARIANTS.md:
+# a-ratification-never-drops-the-proposed-text.
+RATIFY_CHANNEL = {"update": "argv or stdin", "new": "argv", "essence": "argv", "rewrite": "stdin"}
+
+
 def _render_proposed_write(f: dict) -> str:
+    channel = RATIFY_CHANNEL.get(f["verb"], "unknown")
     return (f"- [PROPOSED write] {f['ts']} HEAD {f['head']} via `qq {f['verb']} {f['head']}` "
             f"by model {f['model']} – pending ratification: a trusted session replays the "
-            f"JSON-decoded text through that verb, then deletes this line; text: "
-            f"{json.dumps(f['text'], ensure_ascii=False)}")
+            f"JSON-decoded text through that verb (text channel: {channel}), then deletes this "
+            f"line; text: {json.dumps(f['text'], ensure_ascii=False)}")
 
 
 _RENDERERS: dict[str, Callable[[dict], str]] = {

@@ -251,6 +251,30 @@ def _read_stdin_text() -> str:
     return sys.stdin.buffer.read().decode("utf-8", errors="replace")
 
 
+def _stdin_carries_data(grace: float = 0.2) -> bool:
+    """Has text ARRIVED on stdin? Never reads it: FIONREAD counts the bytes waiting in a pipe or
+    socket, a regular file is measured by size vs offset, a tty or /dev/null is never text.
+    `grace` covers a pipe whose writer has not written yet (`printf … | qq new t`); a writer
+    slower than that is not seen. Not reading matters: a stdin that never EOFs (an agent
+    harness's socket, `ssh` without -n) must not hang a verb that does not take stdin."""
+    import fcntl, select, stat as _stat, struct, termios
+    try:
+        fd = sys.stdin.fileno()
+        if os.isatty(fd):
+            return False
+        st = os.fstat(fd)
+        if _stat.S_ISREG(st.st_mode):
+            return st.st_size > os.lseek(fd, 0, os.SEEK_CUR)
+        if not (_stat.S_ISFIFO(st.st_mode) or _stat.S_ISSOCK(st.st_mode)):
+            return False
+        if not select.select([fd], [], [], grace)[0]:
+            return False
+        n = struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0"))[0]
+        return n > 0
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def _consume_prepend_flags(rest: list[str]) -> "Optional[tuple[list[str], list[str]]]":
     """Port of qq-legacy `update)`'s own flag-scanning loop: tolerate a leaked
     `--prepend-update` (an internal qq-write flag some old habits still pass — a no-op here,
@@ -382,6 +406,15 @@ def _cmd_new(store: Store, args: list[str]) -> int:
         print(f"qq new: unexpected flag '{rest[0]}' – usage: qq new <topic> [essence text...]  "
               f"(use -- before text starting with --)", file=sys.stderr)
         return 2
+    if not rest and _stdin_carries_data():
+        # `new` reads its essence from argv only. Text piped in with no argv text would be
+        # dropped and the HEAD created with the placeholder essence, exit 0 — the way a
+        # ratified `new` proposal lost its text. INVARIANTS.md:
+        # a-ratification-never-drops-the-proposed-text.
+        print("qq new: text on stdin is not read – the essence goes in argv: "
+              "qq new <topic> <essence text...>; if that stdin is inherited (a `while read` "
+              "loop), run it as: qq new <topic> </dev/null", file=sys.stderr)
+        return 2
     try:
         sys.stdout.write(writemod.new(store, topic, " ".join(rest), refs=refs))
     except writemod.WriteError as e:
@@ -403,7 +436,17 @@ def _cmd_rewrite(store: Store, args: list[str]) -> int:
     consumed = _consume_ref_flags(rest, "rewrite")
     if consumed is None:
         return 2
-    _, refs = consumed   # any OTHER further argv is silently ignored, matching qq-legacy's own case
+    rest, refs = consumed
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    if rest:
+        # `rewrite` reads the whole file from stdin only. Further argv used to be ignored
+        # (qq-legacy's case), so `qq rewrite <topic> <text>` with data on stdin wrote the stdin
+        # and dropped the argv text, exit 0. Refused whatever stdin carries. INVARIANTS.md:
+        # a-ratification-never-drops-the-proposed-text.
+        print("qq rewrite: text in argv is not read – the whole file goes on stdin: "
+              "qq rewrite <topic> < full_content", file=sys.stderr)
+        return 2
     content = _read_stdin_text()
     try:
         sys.stdout.write(writemod.rewrite(store, topic, content, refs=refs, allow_future=allow_future))

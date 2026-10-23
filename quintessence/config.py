@@ -24,6 +24,7 @@ Defaults in KEYS are GENERIC: no deployment-specific ports, no site-specific nam
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Union
@@ -213,10 +214,15 @@ KEYS: list[KeyDef] = [
 
     # ---- ask (retrieval-as-QA) -----------------------------------------------------------
     KeyDef("QQ_ASK_ENDPOINTS", "csv", [], "ask",
-           "Completion endpoints for `qq ask`, comma-separated; the first healthy one answers. "
-           "Empty by default, so with nothing configured `ask` falls back to plain retrieval "
-           "plus a one-line hint rather than probing local ports that belong to something "
-           "else. Set it to the endpoint serving your own model."),
+           "Completion endpoints for `qq ask`, comma-separated, tried in the order written: "
+           "the first that passes its probe is asked, and if that one fails to complete — a "
+           "timeout, a context overflow, an empty answer — `ask` steps down to the next rather "
+           "than giving up, so put the fastest first and a slower fallback after it. Raw "
+           "retrieval is what you get when every one of them fails, and the answer names which "
+           "failed how. The answer also names the endpoint that produced it. Empty by default, "
+           "so with nothing configured `ask` falls back to plain retrieval plus a one-line hint "
+           "rather than probing local ports that belong to something else. Set it to the "
+           "endpoint serving your own model."),
     KeyDef("QQ_ASK_MIN_SIM", "float", 0.35, "ask",
            "Cosine floor for the evidence pack: if every embedder-ranked hit scores below it, "
            "`ask` answers 'nothing relevant in the store' and never calls a completion "
@@ -229,6 +235,34 @@ KEYS: list[KeyDef] = [
            "whose score is a term-overlap fraction on a different scale, not a cosine "
            "similarity. Raise it to refuse more readily, lower it to let thinner evidence "
            "through."),
+    KeyDef("QQ_ASK_MODELS", "csv", [], "ask",
+           "Model NAME per endpoint, as `url=model` entries (e.g. "
+           "'http://127.0.0.1:11434=qwen3:4b-instruct'). Needed only for an endpoint that "
+           "selects a model by name instead of serving whatever it loaded: llama-server "
+           "ignores the request's `model` field, while ollama selects by it and 404s on a "
+           "name it does not have. Naming a model also changes how that endpoint is "
+           "health-probed — `/v1/models` instead of `/health`, which ollama does not serve — "
+           "and the probe certifies the name against the list that answer carries: an endpoint "
+           "configured with a model it does not serve fails its probe, so the ladder steps past "
+           "it instead of picking it and taking a 404. An endpoint named here can still be one "
+           "that loads the model ON DEMAND: it is listed while idle, and the completion call "
+           "pays the load (~3s) well inside the completion timeout. That is what lets a tier "
+           "hold no VRAM between questions."),
+    KeyDef("QQ_ASK_SLOTS", "csv", [], "ask",
+           "Slot to pin per endpoint, as `url=n` entries (e.g. "
+           "'http://127.0.0.1:8090=1'). Only for a RESIDENT multi-slot llama-server shared "
+           "with other clients: it sends `id_slot`, which tells the server to serve this "
+           "request on that slot rather than on whichever one it picks. Two reasons to set "
+           "it. A server places an unpinned request on its first free slot — slot 0 on an "
+           "idle server — so every unpinned client collides on the same slot, and a client "
+           "that watches slot 0 to decide the server is busy (a voice assistant, say) is made "
+           "to wait behind an evidence pack it knows nothing about. And the prompt cache is "
+           "per slot, so a client that keeps its own slot keeps its own warm cache. Leave it "
+           "unset for a single-slot server, for ollama, and for any endpoint you do not share "
+           "— the request then names no slot and the server places it. An entry whose value "
+           "is not a whole number is IGNORED rather than passed through: a server refuses a "
+           "request naming a slot it does not have, and `ask` would read that refusal as the "
+           "rung being down and step past a healthy tier to a slower one."),
     KeyDef("QQ_ASK_BUDGETS", "csv", [], "ask",
            "Per-endpoint evidence-pack size, as `url=chars` entries (e.g. "
            "'http://127.0.0.1:8095=8000'). Overrides the built-in per-endpoint table; an "
@@ -322,6 +356,21 @@ KEYS: list[KeyDef] = [
     # ---- L0 write-path (lock) -------------------------------------------------------------
     KeyDef("QQ_LOCK_WAIT", "int", 30, "write-lock",
            "Seconds to block acquiring the store write-lock before giving up."),
+
+    # ---- idle-checkpoint autosave hook (idle-autosave.sh) --------------------------------------
+    KeyDef("QQ_IDLE_AUTOSAVE_DELAY", "int", 3000, "idle-autosave",
+           "Seconds a session's transcript must stay continuously quiet before the idle-checkpoint "
+           "Stop hook wakes it to checkpoint. 3000, not 3300: Claude Code's idle compaction fires "
+           "at 54m19s-55m24s of quiet and its transcript write resets the hook's clock, so a "
+           "longer delay loses the race. Keep the hook entry's timeout above this."),
+    KeyDef("QQ_IDLE_AUTOSAVE_POLL", "int", 60, "idle-autosave",
+           "Seconds between the idle-checkpoint hook's transcript checks."),
+    KeyDef("QQ_IDLE_AUTOSAVE_STATE", "path",
+           lambda cfg: os.path.join(cfg.get_path("QQ_STATE_DIR"), "idle-autosave"), "idle-autosave",
+           "Directory for the idle-checkpoint hook's per-session state (armed-timer PID, "
+           "activity baseline)."),
+    KeyDef("QQ_IDLE_AUTOSAVE_DISABLE", BOOL_TRUTHY_EXACT_ONE, False, "idle-autosave",
+           "Set to exactly `1` to make the idle-checkpoint hook a no-op."),
 
     # ---- HEAD size thresholds (shared by the soft write-time nudge and the hard check flag) --
     KeyDef("QQ_COMPACT_SOFT_BYTES", "int", 32768, "size-thresholds",
@@ -530,6 +579,14 @@ KEYS: list[KeyDef] = [
 KEYS_BY_NAME: dict[str, KeyDef] = {k.name: k for k in KEYS}
 
 
+# Typed-integer grammar: ASCII digits only (see ask._WHOLE_NUMBER_RE). The one key whose meaning
+# admits a negative is QQ_EMBED_NUM_GPU (Ollama options.num_gpu, -1 = automatic); every other
+# int key is a size, count, wait or limit.
+_WHOLE_NUMBER_RE = re.compile(r"[0-9]+")
+_SIGNED_INT_RE = re.compile(r"-?[0-9]+")
+_SIGNED_INT_KEYS = frozenset({"QQ_EMBED_NUM_GPU"})
+
+
 class ConfigError(Exception):
     pass
 
@@ -686,7 +743,7 @@ class Config:
             return self._file_values[name]
         return builtin_default
 
-    def _coerce(self, type_: str, raw: str) -> Any:
+    def _coerce(self, type_: str, raw: str, name: str = "") -> Any:
         """Instance method, not a static one, because `path` must expand `~` against THIS
         Config's home (_expanduser -> _home), not the process home. It was static until the
         2026-07-29 verification round (F3): a Config built with env={'HOME': '/synthetic'}
@@ -698,6 +755,12 @@ class Config:
         if type_ == "path":
             return _expanduser(self, raw)
         if type_ == "int":
+            # Accept exactly the grammar, not int()'s: int() also reads `1_000`, `+7`, ` 5` and
+            # non-ASCII decimal digits (D890/D893 – the same grammar `url=<whole number>` uses).
+            pattern = _SIGNED_INT_RE if name in _SIGNED_INT_KEYS else _WHOLE_NUMBER_RE
+            if not pattern.fullmatch(raw):
+                raise ConfigError(f"{name or 'config value'}: {raw!r} is not a number "
+                                  f"(want ASCII decimal digits{', optional leading -' if pattern is _SIGNED_INT_RE else ''})")
             return int(raw)
         if type_ == "float":
             return float(raw)
@@ -732,7 +795,7 @@ class Config:
                 # string – QQ_REMOTE_ALLOWED_ORIGINS returned "https://claude.ai" instead of
                 # ["https://claude.ai"], and a caller iterating it got one character per item.
                 # `path` keeps its ~-expansion (that is what _coerce does for path).
-                value = self._coerce(kd.type, default)
+                value = self._coerce(kd.type, default, name)
             elif kd.type == "csvpath" and isinstance(default, list):
                 # A csvpath default written as a list literal is already the target SHAPE but
                 # not the target VALUE: a `~` in one of its entries would reach a caller
@@ -747,7 +810,7 @@ class Config:
                 # or an int key's None ("unset" is meaningful there). Left untouched.
                 value = default
         else:
-            value = self._coerce(kd.type, raw)
+            value = self._coerce(kd.type, raw, name)
         self._cache[name] = value
         return value
 
@@ -775,13 +838,13 @@ class Config:
             if kd.type in _BOOL_TYPES and default is None:
                 value: Any = _BOOL_UNSET_DEFAULT[kd.type]
             elif isinstance(default, str):
-                value = self._coerce(kd.type, default)
+                value = self._coerce(kd.type, default, name)
             elif kd.type == "csvpath" and isinstance(default, list):
                 value = [_expanduser(self, str(p)) for p in default]
             else:
                 value = default
         else:
-            value = self._coerce(kd.type, raw)
+            value = self._coerce(kd.type, raw, name)
         self._cache[ck] = value
         return value
 
