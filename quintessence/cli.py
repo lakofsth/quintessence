@@ -18,7 +18,6 @@ import difflib
 import json
 import os
 import re
-import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -105,8 +104,8 @@ def _epoch_of(updated_raw: str) -> int:
     searched for the first date-shaped run ANYWHERE in the line, a third stamp grammar that let
     a date inside prose capture the ranking (and was why the derived agent marker could not be
     placed before the stamp). Date precision on purpose, not seconds: same-day HEADs have
-    always ranked as ties resolved by the sort binary, and finer ranking would be a behaviour
-    change, not a refactor."""
+    always ranked as ties (broken by slug since 2026-10-24, see _rank_by_epoch), and finer
+    ranking would be a behaviour change, not a refactor."""
     ts = stamp_of(updated_raw)
     dt = stamp_datetime(ts[:10]) if ts else None
     return int(dt.timestamp()) if dt else 0
@@ -117,23 +116,14 @@ def _truncate_essence(ess: str, width: int = 160) -> str:
 
 
 def _rank_by_epoch(rows: list[tuple[int, str, str]]) -> list[tuple[int, str, str]]:
-    """rows: (epoch, slug, essence). Order: epoch descending, matching bash's
-    `sort -t$'\\t' -k1,1nr`. GNU sort's tie-break for lines whose key field compares equal is an
-    implementation detail of its merge, not a documented total order — rather than guess it (and
-    risk silently diverging on a future store shape), shell out to the SAME `sort` binary the
-    legacy engine uses, so ties resolve identically forever on any host with coreutils sort."""
-    if not rows:
-        return []
-    payload = "\n".join(f"{e}\t{s}\t{ess}" for e, s, ess in rows)
-    proc = subprocess.run(["sort", "-t", "\t", "-k1,1nr"], input=payload,
-                           capture_output=True, text=True, check=True)
-    out: list[tuple[int, str, str]] = []
-    for line in proc.stdout.split("\n"):
-        if not line:
-            continue
-        epoch_s, slug, ess = line.split("\t", 2)
-        out.append((int(epoch_s), slug, ess))
-    return out
+    """rows: (epoch, slug, essence). Order: epoch descending, then slug in codepoint order —
+    a total order (slugs are unique), computed in-process so it is the same on every host.
+    Until 2026-10-24 this shelled out to the system `sort -t$'\\t' -k1,1nr` to match the bash
+    engine's tie order; that order is `sort`'s last-resort whole-line compare, which follows
+    LC_COLLATE and the `sort` implementation, so same-day HEADs listed differently under a C
+    locale and under uutils sort (as on GitHub's ubuntu-26.04 runner). The bash engine is gone, so
+    there is nothing left to match. INVARIANTS.md: digest-order-is-the-same-on-every-host."""
+    return sorted(rows, key=lambda r: (-r[0], r[1]))
 
 
 CORPUS_REFS_DIGEST_MAX = 10   # same glance-not-adjudication rationale as FINDINGS_DIGEST_MAX

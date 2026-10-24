@@ -15,6 +15,7 @@ mechanics, and the qq-legacy stub survives P9 as a TRIPWIRE: any test that sees
 found via PYTHONPATH pointing at the real repo, since the temp copy of `qq` has no package
 alongside it.
 """
+import fcntl
 import os
 import shutil
 import stat
@@ -159,17 +160,31 @@ class TestNativeVerbsDoNotDelegate(DispatcherHarness):
         message. `qq` must match bash's quiet behavior, not leak a Python implementation
         detail to a piped caller (a hook capturing partial output, `qq digest | head -1`,
         etc.)."""
-        # A big enough store that render_menu's output exceeds the pipe buffer, so `head -1`
-        # closing its read end after the first line forces a SECOND write() from qq to hit a
-        # truly-closed pipe (a single small write can complete before the reader even closes,
-        # which is why this needs real bulk, not just a `.close()` race against one write()).
+        # The reader takes ONE byte and exits, and the menu is bigger than the pipe can hold, so
+        # qq is still blocked in write() when the reader goes and that write() must fail. Until
+        # 2026-10-24 the reader was `head -1`, which made the outcome depend on how much `head`
+        # reads before it exits: GNU head leaves qq blocked, but uutils head 0.0.30 drains all
+        # 112 KB, so qq finishes and exits 0 — red on a correct qq, as on GitHub's ubuntu-26.04
+        # runner (coreutils 9.5-1ubuntu2+0.0.0~ubuntu25, read as uutils from that version
+        # string). Both preconditions are asserted rather than assumed.
         for i in range(200):
             store_head = os.path.join(self.store_dir, f"h{i}.md")
             with open(store_head, "w") as f:
                 f.write(f"# Quintessence — h{i}\n> updated: 2026-07-01T00:00:00Z (created)\n"
                         f"> essence: {'x' * 500}\n\n## RE-ENTER HERE\n")
         qq_path = os.path.join(self.tmp, "qq")
-        cmd = f'"{sys.executable}" "{qq_path}" menu | head -1'
+        full = subprocess.run([sys.executable, qq_path, "menu"], capture_output=True,
+                              env=self.env, timeout=10)
+        r, w = os.pipe()
+        try:
+            capacity = fcntl.fcntl(w, fcntl.F_GETPIPE_SZ)
+        finally:
+            os.close(r)
+            os.close(w)
+        self.assertGreater(len(full.stdout), capacity + 1,
+                           "the menu must outgrow the pipe or qq's write() can complete")
+        reader = f'"{sys.executable}" -c "import os; os.read(0, 1)"'
+        cmd = f'"{sys.executable}" "{qq_path}" menu | {reader}'
         proc = subprocess.run(["bash", "-c", f"{cmd}; echo EXIT=${{PIPESTATUS[0]}} >&2"],
                                capture_output=True, text=True, env=self.env, timeout=10)
         exit_code = int(proc.stderr.strip().rsplit("EXIT=", 1)[-1])

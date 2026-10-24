@@ -318,6 +318,42 @@ class TestDigest(unittest.TestCase):
             self.assertEqual(out, golden)
 
 
+class TestDigestOrderIsTheSameOnEveryHost(unittest.TestCase):
+    """INVARIANTS.md: digest-order-is-the-same-on-every-host. Same-day HEADs used to be ordered
+    by the system `sort`'s last-resort compare, so the digest listed extra10 before extra1 under
+    GNU sort in en_US.UTF-8 and after it under a C locale or uutils sort — GitHub's ubuntu-26.04
+    runner turned test-surface-freeze red on 23 Oct 2026 this way. Each subtest varies one thing
+    the host decides (LC_ALL, which `sort` is first on PATH) and expects the same order."""
+
+    def test_ties_break_by_slug_whatever_the_locale_or_sort_binary(self):
+        import tempfile
+        from datetime import datetime, timezone
+        from unittest import mock
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+        with tempfile.TemporaryDirectory() as base:
+            store = make_store(base)
+            for slug in ("extra2", "extra10", "extra1"):
+                (store.qdir / f"{slug}.md").write_text(
+                    f"# Quintessence — {slug}\n> updated: {today} (created)\n"
+                    f"> essence: {slug} essence\n\n## RE-ENTER HERE\n")
+            (store.qdir / "older.md").write_text(HEAD_ALPHA.replace("alpha", "older"))
+            # a `sort` that reverses its input: if the digest consults any `sort` on PATH, the
+            # order it prints changes
+            stub = os.path.join(base, "bin")
+            os.makedirs(stub)
+            with open(os.path.join(stub, "sort"), "w") as f:
+                f.write("#!/bin/sh\nexec tac\n")
+            os.chmod(os.path.join(stub, "sort"), 0o755)
+            hosts = [{"LC_ALL": loc} for loc in ("en_US.UTF-8", "C.UTF-8", "C")]
+            hosts.append({"PATH": stub + os.pathsep + os.environ.get("PATH", "")})
+            for host in hosts:
+                with self.subTest(**host), mock.patch.dict(os.environ, host):
+                    out = cli.render_digest(store, store.config)
+                    listed = [ln.split()[1] for ln in out.splitlines()
+                              if ln.startswith("  ") and len(ln.split()) > 1]
+                    self.assertEqual(listed, ["extra1", "extra10", "extra2", "older"])
+
+
 class TestListPathShowBrief(unittest.TestCase):
     def test_list_empty(self):
         import tempfile

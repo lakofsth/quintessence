@@ -76,7 +76,13 @@ printf '{"session_id":"%s","transcript_path":"%s"}' "$SID" "$TR" \
       QQ_IDLE_AUTOSAVE_DELAY=300 QQ_IDLE_AUTOSAVE_POLL=1 bash "$HOOK" >/dev/null 2>&1 &
 apid=$!
 for _ in $(seq 1 50); do [ -n "$(cat "$TMP/state/timer-$SID.pid" 2>/dev/null)" ] && break; sleep 0.1; done
-bash -c 'exec -a idle-autosave-bystander sleep 120' & bystander=$!
+# The bystander is a renamed bash, not a renamed sleep: uutils ships one multicall binary that
+# picks its tool from argv[0], so `exec -a <name> sleep` exits at once there and the bystander
+# looked killed with no hook involved. `; :` stops bash exec-ing sleep in its own place.
+bash -c 'exec -a idle-autosave-bystander bash -c "sleep 120; :"' & bystander=$!
+for _ in $(seq 1 50); do tr '\0' ' ' <"/proc/$bystander/cmdline" 2>/dev/null | grep -q '^idle-autosave-bystander' && break; sleep 0.1; done
+if tr '\0' ' ' <"/proc/$bystander/cmdline" 2>/dev/null | grep -q '^idle-autosave-bystander'; then ok "(d) precondition: the bystander is alive and its cmdline names idle-autosave"
+else no "(d) precondition: no live bystander named idle-autosave — the kill check below would prove nothing"; fi
 run_hook "$SID" "$TR"                          # the newer arm (DELAY 1)
 sleep 1.5
 if ! kill -0 "$apid" 2>/dev/null; then ok "(d) the older arm was superseded and is gone"

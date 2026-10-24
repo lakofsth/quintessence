@@ -455,7 +455,7 @@ author's same-commit route to making it true, and the gate's failure message nam
 - Site derivation: the gate and the tool share one definition of what is counted and where it is
   read (`COLLECT_ARGV`, `COLLECTED`, `PYTHON_ROW`, `SHELL_ROW` in the tool, imported by the gate),
   so there is one collection and no second copy to drift.
-- Pin: none yet — certify pending. Its certify, `stuck/20261018T223105Z`, is parked: its range is the one commit that creates the tool, so the check is red at pre_fix only because the tool is missing.
+- Pin: `tests/py/test_sync_assurance_counts_certify.py` (landed by `18b65ff`; certify `done/20261022T015228Z`, red end by mutation: the earlier certify `stuck/20261018T223105Z` was parked because the tool does not exist at its pre_fix).
 
 **Amendment, 21 Oct 2026 (the clean-checkout clause): the count the tool writes and the gate
 checks is the count a clean checkout of the commit gives — the gate fails, naming the cause, on
@@ -517,7 +517,7 @@ notes[1]).
   added test function, with the tool's figure green in a fresh clone and a control; a tracked
   test and suite deleted from the working tree; a staged new test file; a committed
   `.gitignore` rule, and a file force-added past it; `GIT_INDEX_FILE` naming another index).
-- Pin (index clause): none yet — no certify registered (none in the queue's `queue/`, `done/` or `stuck/` on 21 Oct 2026).
+- Pin (index clause): `tests/py/test_count_gate_counts_the_index.py` (landed by `00f56e1`; certify `done/20261024T041355Z`). Not covered by the check: `GIT_WORK_TREE` and other `GIT_*` variables beyond `GIT_INDEX_FILE` and `GIT_DIR`, and a staged deletion of a tracked test file whose working-tree copy is restored.
 
 **Amendment, 21 Oct 2026 (the unresolved-index clause, amending the index clause): the tool and
 the gate refuse, naming the files and writing nothing, while the index holds an intent-to-add
@@ -565,8 +565,7 @@ passed the gate before the commit and was red at the landing.
   id; the deselected shape, unit and by a deselecting conftest; `--check` on an unstaged figure)
   and `tests/py/test_assurance_counts.py` `TestTheGateJudgesWhatACleanCheckoutCollects` (the
   same three on the gate).
-- Pin (summary-line clause): none yet — certify pending (registered by the unit that wrote this
-  clause).
+- Pin (summary-line clause): `tests/py/test_count_summary_line_certify.py` (landed by `bee7f97`; certify `done/20261021T064715Z`).
 
 ## `an-idle-session-is-woken-once-per-stretch-of-new-work-and-never-by-its-own-checkpoint`
 
@@ -591,3 +590,47 @@ cleared session woke hourly only to decline.
 - Checks: `tests/test-idle-autosave.sh` cases (a)–(h) (fixture transcript, DELAY=1/POLL=1; the
   clock-reset case runs DELAY=4); `tests/test-setup-wire.sh` pins that `--wire-claude` emits
   `async`/`asyncRewake`/`timeout`/`rewakeMessage` and is idempotent.
+
+## `digest-order-is-the-same-on-every-host`
+
+**What `qq` prints, and what a test of it concludes, does not depend on which coreutils or which
+locale the host has: no ordering qq shows and no verdict a test reaches is left to a host
+program's unspecified behaviour — `sort`'s tie order, how much `head` reads before it exits.**
+
+*Instance that earned it:* the 7cc174e release went red on GitHub on 23 Oct 2026 when
+`ubuntu-latest` became ubuntu-26.04, whose coreutils package is `9.5-1ubuntu2+0.0.0~ubuntu25`
+— uutils, by inference from that version string; rust-coreutils 0.0.30 reproduces both here.
+`_rank_by_epoch` shelled out to `sort -t$'\t' -k1,1nr` to copy the bash engine's tie order, which
+is `sort`'s last-resort whole-line compare: GNU sort in en_US.UTF-8 lists `extra10` before
+`extra1`, GNU sort in a C locale and uutils sort in any locale list it after. And
+`test_menu_piped_into_a_closing_reader_dies_quietly_like_bash` piped into `head -1`: GNU head
+exits with qq still blocked at 73 KB, uutils head reads all 112 KB first, so qq never meets a
+closed pipe and exits 0.
+The full suite run with uutils first on PATH found a third, latent one that CI's runner did not
+show: `test-idle-autosave.sh` (d) made its bystander with `exec -a idle-autosave-bystander sleep`,
+and multicall uutils picks its tool from argv[0], so that bystander exited at once and read as
+killed by the hook.
+
+- Site derivation: every `subprocess` call in `quintessence/` and `qq` (all are git, systemctl,
+  ss, ssh or bash probes of the host itself, none a text filter qq's output passes through), and
+  every external program a test's verdict passes through (found by running the whole suite with
+  uutils first on PATH, not by a hand-list). Ties now break by slug in-process
+  (`sorted(rows, key=lambda r: (-r[0], r[1]))`); the pipe test's reader takes one byte and exits,
+  and the test asserts the menu outgrows the pipe (`F_GETPIPE_SZ`) rather than assuming it.
+- Not covered, on purpose: `store._locale_sort_key` orders menu and list output by the process's
+  own LC_COLLATE. That is deterministic for a given locale and is the documented behaviour, not an
+  implementation's accident.
+- Checks: `tests/py/test_cli.py` `TestDigestOrderIsTheSameOnEveryHost` (subtests for LC_ALL
+  en_US.UTF-8, C.UTF-8 and C, and for a reversing `sort` first on PATH; red at the base under
+  en_US.UTF-8 and the stub); `digest-over-max-quirk.golden` regenerated for slug order;
+  `tests/py/test_dispatcher.py` `test_menu_piped_into_a_closing_reader_dies_quietly_like_bash`
+  (red with the `except BrokenPipeError` handler mutated away, green 50 of 50 runs, green with
+  uutils head first on PATH); `tests/test-idle-autosave.sh` (d) precondition, which asserts the
+  bystander is alive with a cmdline naming idle-autosave before the kill check reads it (red with
+  the renamed-`sleep` bystander under uutils, green under GNU and uutils). Whole-suite sweep:
+  `tests/run.sh` with `/usr/lib/cargo/bin/coreutils` (rust-coreutils 0.0.30) first on PATH, under
+  the en_US.UTF-8 that `run.sh` pins (the digest subtests cover the other locales). The one
+  remaining uutils-only red, test-tsk `stop after lost race left no marker`, is a timing race in
+  that test's start, not this class: the loser renames its `.run` into place before the live
+  unit's bash has opened its own, so the live unit runs `true`; waiting for the live job's start
+  line before racing turns it 0 of 5 red from 2 of 3.
