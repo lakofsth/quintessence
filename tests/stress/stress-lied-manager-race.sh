@@ -11,10 +11,12 @@
 # showing a sleep-30 job logging start+exit rc=0 in the same second (the loser's `true`
 # executed under the winner's name). Post-flock-fix the loop does NOT run clean: the stubbed
 # deep window remains reachable by design (suite test 4k), and the same substitution still
-# lands there — measured 1/200 on the first full post-fix run (tests/stress/README.md). Each
-# one is counted and printed as deep_window_substitutions on the RESULT line, as a reported
-# residual; the exit status fails only on outcomes outside the two known ones, so it does not
-# move with that count.
+# lands there — measured 1/200 on the first full post-fix run (tests/stress/README.md).
+# The unique runner path (tsk: each start writes its runner to a path of its own, and the shared
+# .run/.cmd records only after its unit exists) closes that window, so a substitution is now a
+# FAILURE with a ceiling of zero (ledger D272: it used to be counted and left out of the exit
+# status, so 1/200 and 200/200 exited alike). It is still counted apart on the RESULT line,
+# because it is the signature of the window reopening.
 #
 # Contention lane: drives real systemd --user units in a loop — idle box only.
 # Usage: stress-lied-manager-race.sh [iterations]
@@ -77,18 +79,16 @@ STUB
   # Two KNOWN outcomes under the stub. (a) The winner's child had already opened its
   # script: stop kills a real sleep-30, marker rc=143. (b) The forced manager lie landed
   # inside the winner's fork-to-first-open gap: the loser's script is what the child
-  # opens — the documented deep-window substitution, reachable only when the manager
-  # mis-reports a live unit (every truthful-manager path is closed by the start lock +
-  # the activating-aware check). (b) is MEASURED and reported, not a gate failure — the
-  # gate on it is the unique-runner-path rework, queued as its own series. Anything
-  # OUTSIDE these two outcomes fails the run.
+  # opens — the deep-window substitution. The unique runner path closed it: (b) FAILS the
+  # run (ceiling 0), counted apart so the RESULT line says which outcome it was. Anything
+  # outside (a) fails the run.
   if grep -q "DONE_PRESENT=yes RC=143" "$out"; then
     :
   elif grep -q "DONE_PRESENT=yes RC=0" "$out" && grep -q "raced_rc=1" "$out"; then
     deep_subst=$((deep_subst+1))
     mkdir -p "$FAILDIR"
     cp "$out" "$FAILDIR/deep-subst-$(printf '%04d' "$i")-$$.log"
-    echo "DEEP-WINDOW SUBSTITUTION iter $i (measured, not a failure) -> $FAILDIR"
+    echo "FAIL DEEP-WINDOW SUBSTITUTION iter $i (the unique-runner window reopened) -> $FAILDIR"
   else
     total_fail=$((total_fail+1))
     mkdir -p "$FAILDIR"
@@ -100,5 +100,5 @@ STUB
   rm -rf "$TMP"
   if [ $((i % 50)) -eq 0 ]; then echo "progress: $i/$ITERS done, fails=$total_fail" >&2; fi
 done
-echo "RESULT total_fail=$total_fail / $ITERS  (deep_window_substitutions=$deep_subst — measured residual, evidence in $FAILDIR)"
-[ "$total_fail" -eq 0 ]
+echo "RESULT total_fail=$total_fail / $ITERS  (deep_window_substitutions=$deep_subst, ceiling 0; evidence in $FAILDIR)"
+[ "$total_fail" -eq 0 ] && [ "$deep_subst" -eq 0 ]

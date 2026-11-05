@@ -17,12 +17,23 @@ import threading
 import time
 import unittest
 import unittest.mock
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from quintessence.config import Config
 from quintessence import search as searchmod
 from quintessence.search import SearchIndex, cache_identity, identity_cache_path
+
+
+def _nonce_slug(stem: str) -> str:
+    """A fixture name that cannot occur in the ambient scratch directory's path: a test's oracle
+    over hit paths must not depend on what TMPDIR happens to be called (ledger D1344)."""
+    scratch = os.path.realpath(tempfile.gettempdir())
+    while True:
+        slug = f"{stem}-{uuid.uuid4().hex[:12]}"
+        if slug not in scratch:
+            return slug
 
 
 def make_index(base: str, **overrides) -> SearchIndex:
@@ -523,7 +534,7 @@ class TestMCPServerPattern(unittest.TestCase):
 
             hits_before = idx.search("sentinel", k=10)
             paths_before = {h["path"] for h in hits_before}
-            self.assertFalse(any("late" in p for p in paths_before))
+            self.assertNotIn("late.md", {os.path.basename(p) for p in paths_before})
 
             time.sleep(0.01)
             with open(os.path.join(base, "kb", "docs", "late.md"), "w") as f:
@@ -531,7 +542,7 @@ class TestMCPServerPattern(unittest.TestCase):
 
             hits_after = idx.search("sentinel", k=10)   # the NEXT tool call on the SAME instance
             paths_after = {h["path"] for h in hits_after}
-            self.assertTrue(any("late" in p for p in paths_after),
+            self.assertIn("late.md", {os.path.basename(p) for p in paths_after},
                              "a long-lived SearchIndex must revalidate and see a HEAD written "
                              "after the first call, not serve its startup snapshot forever")
 
@@ -734,18 +745,24 @@ class TestRedaction(unittest.TestCase):
         return path
 
     def test_search_drops_redacted_hit_via_embedder_path(self):
+        # A nonce slug, because the redaction matcher also matches an entry as a SUBSTRING of
+        # the hit path, which here is absolute under TMPDIR: a fixed slug would be matched by
+        # an ambient scratch directory of the same name and redact every hit (ledger D1344).
+        secret = _nonce_slug("secret-topic")
         with tempfile.TemporaryDirectory() as base:
             write_corpus(base, n=1, source="docs")
-            with open(os.path.join(base, "kb", "docs", "secret-topic.md"), "w") as f:
-                f.write("# secret-topic\nxyzzy-marker withheld content\n")
-            redact_file = self._write_redact_file(base, "secret-topic")
+            with open(os.path.join(base, "kb", "docs", f"{secret}.md"), "w") as f:
+                f.write(f"# {secret}\nxyzzy-marker withheld content\n")
+            redact_file = self._write_redact_file(base, secret)
             idx = make_index(base, QQ_REDACT_FILE=redact_file)
             idx.embed = FakeEmbedder()
             hits = idx.search("xyzzy-marker", k=10)
             self.assertTrue(hits, "expected the non-redacted docs to still surface")
-            self.assertFalse(any("secret-topic" in h["path"] for h in hits))
+            self.assertNotIn(f"{secret}.md", {os.path.basename(h["path"]) for h in hits})
 
     def test_grep_fallback_drops_redacted_hit(self):
+        # a nonce slug, for the reason given in the test above
+        secret = _nonce_slug("secret-topic")
         with tempfile.TemporaryDirectory() as base:
             docs = os.path.join(base, "kb", "docs")
             os.makedirs(docs, exist_ok=True)
@@ -753,15 +770,15 @@ class TestRedaction(unittest.TestCase):
             # candidates -- the redaction filter, not the term match, is what's under test here.
             with open(os.path.join(docs, "public-topic.md"), "w") as f:
                 f.write("# public-topic\nxyzzy-marker public content\n")
-            with open(os.path.join(docs, "secret-topic.md"), "w") as f:
-                f.write("# secret-topic\nxyzzy-marker withheld content\n")
-            redact_file = self._write_redact_file(base, "secret-topic")
+            with open(os.path.join(docs, f"{secret}.md"), "w") as f:
+                f.write(f"# {secret}\nxyzzy-marker withheld content\n")
+            redact_file = self._write_redact_file(base, secret)
             idx = make_index(base, QQ_REDACT_FILE=redact_file)
             idx.embed = lambda text, prefix: None   # embedder unreachable -> keyword fallback
             hits = idx.search("xyzzy-marker", k=10)
             self.assertTrue(hits, "expected the non-redacted doc to still surface")
             self.assertTrue(all(h.get("degraded") for h in hits))
-            self.assertFalse(any("secret-topic" in h["path"] for h in hits))
+            self.assertNotIn(f"{secret}.md", {os.path.basename(h["path"]) for h in hits})
 
     def test_no_redact_file_is_a_noop(self):
         with tempfile.TemporaryDirectory() as base:

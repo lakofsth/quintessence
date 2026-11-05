@@ -41,6 +41,7 @@ from quintessence.xref import Xref  # noqa: E402
 from quintessence import write as writemod  # noqa: E402
 from quintessence import admin as adminmod  # noqa: E402
 from quintessence import authgate  # noqa: E402
+from quintessence import pipeexit  # noqa: E402
 
 
 def _load_redact_entries(path: str) -> list:
@@ -342,6 +343,19 @@ def _consume_ref_flags(rest: list[str], verb: str) -> "Optional[tuple[list[str],
     return rest[i:], refs
 
 
+def _blank_argv_text(verb: str, text_args: list[str]) -> bool:
+    """True (having printed the refusal) when argv text was GIVEN but is empty or whitespace-only
+    once joined: `qq essence t "$text"` with `$text` expanded empty used to blank the essence,
+    exit 0, and `qq update`/`qq new` wrote an empty line or essence the same way, dropping any
+    text on stdin. Leaving the text off (`qq new <topic>`, `echo … | qq update <topic>`) is
+    a different form and is unaffected. INVARIANTS.md: an-empty-argv-text-is-refused."""
+    if text_args and not " ".join(text_args).strip():
+        print(f"qq {verb}: the text given in argv is empty – refusing to write it "
+              f"(did a variable expand empty?)", file=sys.stderr)
+        return True
+    return False
+
+
 def _cmd_update(store: Store, args: list[str]) -> int:
     if not args:
         # JUDGMENT CALL (flagged for review): legacy's `${1:?usage: ...}` exits 1 with a
@@ -356,6 +370,8 @@ def _cmd_update(store: Store, args: list[str]) -> int:
     if consumed is None:
         return 2
     text_args, refs = consumed
+    if _blank_argv_text("update", text_args):
+        return 2
     content = " ".join(text_args) + "\n" if text_args else _read_stdin_text()
     try:
         sys.stdout.write(writemod.update(store, topic, content, refs=refs))
@@ -379,6 +395,8 @@ def _cmd_essence(store: Store, args: list[str]) -> int:
     elif rest and rest[0].startswith("--"):
         print(f"qq essence: unexpected flag '{rest[0]}' – usage: qq essence <topic> <text...>  "
               f"(use -- before text starting with --)", file=sys.stderr)
+        return 2
+    if _blank_argv_text("essence", rest):
         return 2
     if not rest:
         print("usage: qq essence <topic> <text...>", file=sys.stderr)
@@ -405,6 +423,8 @@ def _cmd_new(store: Store, args: list[str]) -> int:
     elif rest and rest[0].startswith("--"):
         print(f"qq new: unexpected flag '{rest[0]}' – usage: qq new <topic> [essence text...]  "
               f"(use -- before text starting with --)", file=sys.stderr)
+        return 2
+    if _blank_argv_text("new", rest):
         return 2
     if not rest and _stdin_carries_data():
         # `new` reads its essence from argv only. Text piped in with no argv text would be
@@ -821,21 +841,20 @@ def main() -> int:
     raise AssertionError(f"unreachable: {cmd!r} in NATIVE_VERBS with no handler")
 
 
-if __name__ == "__main__":
+def _main_guarded() -> int:
     try:
-        sys.exit(main())
+        return main()
     except StorePathError as e:
         # Traversal guard (store.py): a `../`-shaped topic reaching a read verb (show/brief/path)
         # or essence/finalize surfaces here — the write verbs already return 2 via their own
         # WriteError handling. Clean exit 2, never a traceback.
         print(str(e), file=sys.stderr)
-        sys.exit(2)
-    except BrokenPipeError:
-        # A native verb's output piped into something that closes early (`qq menu | head`,
-        # `qq digest | head -1`, a hook capturing partial output) must die quietly, matching
-        # qq-legacy's bash behavior under the SAME SIGPIPE (bash just exits 141, no message) —
-        # not a Python traceback + exit 1. Redirect stdout to /dev/null first so the
-        # interpreter's own shutdown-time flush doesn't raise a SECOND BrokenPipeError.
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
-        sys.exit(141)   # 128 + SIGPIPE(13), the exit code a SIGPIPE-killed process reports
+        return 2
+
+
+if __name__ == "__main__":
+    # A native verb's output piped into something that closes early (`qq menu | head`,
+    # `qq digest | head -1`, a hook capturing partial output) dies quietly with 141, as bash does
+    # under SIGPIPE, on every Python: pipeexit.run flushes stdout inside its own handler, where
+    # Python 3.14 would otherwise raise the error in its shutdown flush and exit 120.
+    pipeexit.run(_main_guarded)

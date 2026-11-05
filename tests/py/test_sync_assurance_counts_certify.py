@@ -62,6 +62,12 @@ class TestTheCountToolWritesWhatTheGateReadsOrNothing(unittest.TestCase):
         os.makedirs(os.path.join(self.root, "tests", "py"))
         self.tool = os.path.join(self.root, "tools", "sync_assurance_counts.py")
         shutil.copy(TOOL, self.tool)
+        # The tool ends through quintessence.pipeexit.run, as every entry point does
+        # (a-reader-that-closes-early-ends-every-entry-point-with-141-and-no-message).
+        os.makedirs(os.path.join(self.root, "quintessence"))
+        for mod in ("__init__.py", "pipeexit.py"):
+            shutil.copy(os.path.join(ENGINE, "quintessence", mod),
+                        os.path.join(self.root, "quintessence", mod))
         with open(os.path.join(self.root, "tests", "py", "test_a.py"), "w") as f:
             f.write("def test_1(): pass\ndef test_2(): pass\ndef test_3(): pass\n")
         with open(os.path.join(self.root, "tests", "py", "test_b.py"), "w") as f:

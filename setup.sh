@@ -18,6 +18,13 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 _qd_explicit="${QUINTESSENCE_DIR+x}"; _mem_explicit="${QQ_MEMDIR+x}"   # was it explicitly provided?
+# The config file fills in what the environment did not set, BEFORE the built-in defaults below, as
+# it does for every other entry point. Read from the environment alone, a store moved with
+# `qq config set QUINTESSENCE_DIR …` (or QQ_MEMDIR) was named $HOME/quintessence here on a re-run:
+# `qq init` made a fresh empty store there and every engine went on to read it. Sourced after the
+# two flags above, so "explicit" still means the environment's own value and not the file's.
+# INVARIANTS.md: every-shell-site-of-a-path-key-names-the-path-config-resolves.
+. "$HERE/qq-config.sh"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 export QUINTESSENCE_DIR="${QUINTESSENCE_DIR:-$HOME/quintessence}"
 export QQ_MEMDIR="${QQ_MEMDIR:-$HOME/.quintessence-memory}"

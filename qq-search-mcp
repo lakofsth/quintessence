@@ -241,9 +241,15 @@ def qq(args: list[str]) -> str:
     return _run_qq(list(args))
 
 
-if __name__ == "__main__":
+def _serve():
     try:
         _index.build_index()  # warm the index so the first tool call is fast
     except Exception as e:  # noqa: BLE001
         print(f"[qq-search-mcp] index warm failed: {e}", file=sys.stderr, flush=True)
     mcp.run()
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from quintessence import pipeexit
+    pipeexit.run(_serve)

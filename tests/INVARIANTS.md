@@ -337,7 +337,7 @@ never promoted.** PROPOSED-write and AUDIT lines embed untrusted text verbatim (
 
 ## `a-ready-proposed-verb-is-a-gated-verb`
 
-**Every verb `write._gate_divert` can queue as a PROPOSED write is offered by `qq findings next` as a ready command for a slug-safe head; the allowed set is `authgate.GATED_VERBS`, not a hand-written list.**
+**Every verb `write._gate_divert` can queue as a PROPOSED write is offered by `qq findings next` for a slug-safe head — as a ready command, or, for a verb whose named channel has no stdin, as its argv form (see `a-bare-ratify-command-is-ready-only-on-a-stdin-channel`); the allowed set is `authgate.GATED_VERBS`, not a hand-written list.**
 
 - Site derivation: the `_gate_divert` call sites in `write.py` (update/new/rewrite/essence) and `cli._READY_CMD_RE`, built from `authgate.GATED_VERBS`; the PROPOSED branch of `cli.render_findings_next` offers a parsed line's verb only when it is in `authgate.GATED_VERBS` (before, it offered any verb of the ready vocabulary, e.g. `show` or `finalize`).
 - Check: `tests/py/test_cert_ready_proposed_verb.py` (landed by `ffa7082`). Unit pins: `TestReadyCommands.test_proposed_write_offers_every_gated_verb`; `tests/py/test_ready_command_template.py::TestReadyCommandFromTemplate::test_proposed_branch_offers_only_a_gated_verb` (the allowed set, with a ready-shaped non-gated verb as its control).
@@ -346,7 +346,7 @@ never promoted.** PROPOSED-write and AUDIT lines embed untrusted text verbatim (
 
 **Every command qq offers as ready for ratifying a proposal carries the proposal's text by the channel that command reads; a command given its text only on a channel it does not read refuses with a non-zero exit (stdin into `qq new` once it has arrived, see Limit), and argv text a command does not read is refused whatever stdin carries, so a ratification never succeeds with the proposed text dropped.**
 
-- Offered as printed: running each command `qq findings next` offers for a queued PROPOSED write of a gated verb, exactly as printed with empty stdin, exits non-zero (or no bare command is offered: for `new` the argv form is printed as a non-ready instruction). Check: `tests/py/test_cert_offered_ready_empty_stdin.py` (landed by `838be61`; red at `5385949`, green at `530e88c`). Unit pin: `tests/py/test_ratify_channel.py::OfferedCommandIsRunAsPrinted`.
+- Offered as printed: running each command `qq findings next` offers for a queued PROPOSED write of a gated verb, exactly as printed with empty stdin, exits non-zero (or no bare command is offered: for a verb whose named channel has no stdin, `new` and `essence`, the argv form is printed as a `run:` line, see `a-bare-ratify-command-is-ready-only-on-a-stdin-channel`). Check: `tests/py/test_cert_offered_ready_empty_stdin.py` (landed by `838be61`; red at `5385949`, green at `530e88c`). Unit pin: `tests/py/test_ratify_channel.py::OfferedCommandIsRunAsPrinted`.
 - Site derivation: the verbs are `authgate.GATED_VERBS` (the verbs `queue_proposal` is called
   with); the channel each one reads is the one the PROPOSED line itself names, read back off a
   line `queue_proposal` wrote; a text can arrive on argv or on stdin.
@@ -377,6 +377,27 @@ never promoted.** PROPOSED-write and AUDIT lines embed untrusted text verbatim (
   own input, so every line but the last is refused (exit 2, no HEAD, no text lost). The refusal
   names the remedy, `qq new <topic> </dev/null`; pinned by
   `NewStdinGrace.test_refusal_names_dev_null_for_inherited_stdin`.
+
+## `a-bare-ratify-command-is-ready-only-on-a-stdin-channel`
+
+**`qq findings next` offers the bare `qq <verb> <head>` as a ready command for a PROPOSED write only when the text channel the line names includes stdin; for every other gated verb it offers no ready command and prints that verb's argv form instead.**
+
+- Site derivation: the PROPOSED branch of `cli.render_findings_next`; the channel is read off the line by `cli._proposed_channel` (before the line's first `; text: `, falling back to `findings.RATIFY_CHANNEL`), never from the verb's name. Before (`c3639bc`) the special case was `verb == "new"`, so `qq essence <head>` was still offered as ready and could only exit 2 with a usage error.
+- Check: none yet — certify pending.
+
+## `a-printed-argv-ratification-passes-the-text-whole`
+
+**The argv form `qq findings next` prints for a PROPOSED write (its `run:` line), run by bash exactly as printed, passes the proposed text to the verb as one argv element equal to the text, so the verb lands it or refuses with a non-zero exit.**
+
+- Site derivation: the argv-only arm of `cli.render_findings_next`, quoting through `cli._bash_quote` (a `$'...'` word: `\` and `'` escaped, every non-printable character spelled as its UTF-8 bytes) after `--`. Before, the line was the template `qq new <head> '<the proposed text, decoded>'`, and a text with an apostrophe filled into it landed with its apostrophes gone, exit 0. A text holding a NUL cannot go on argv, and no `run:` line is printed for it.
+- Check: none yet — certify pending.
+
+## `an-empty-argv-text-is-refused`
+
+**A write verb that reads argv (`update`, `new`, `essence`) refuses, with a non-zero exit and nothing written, argv text that is given but is empty or whitespace-only once joined.**
+
+- Site derivation: `qq`'s `_blank_argv_text`, called by `_cmd_update`, `_cmd_essence` and `_cmd_new` after their flags and `--` are consumed; `rewrite` already refuses any argv text. Leaving the text off (`qq new <topic>`, `… | qq update <topic>`) is a different form and is unaffected. Before, `qq essence t ''` blanked the HEAD's essence with exit 0, and `qq new t ''` and `qq update t ''` wrote an empty essence or update-line, each dropping any text on stdin.
+- Check: none yet — certify pending.
 
 ## `scaffold-never-replaces-a-foreign-hook`
 
@@ -536,6 +557,26 @@ out the whole file, saying it was "counted as staged".
   de-duplicated.
 - Pin (unresolved-index clause): the intent-to-add and unmerged cases of `tests/py/test_count_gate_index.py` (landed by `b9c2ffd`; certify `done/20261021T062026Z-commissioned-certify-the-count-tool-and-gate-refuse-a`, which ran them red at `ce71167` and green at `5374ebe` and added no check of its own).
 
+**Amendment, 26 Oct 2026 (the index-read clause, amending the unresolved-index clause): the tool
+finds an intent-to-add entry by reading the index itself — what `ls-files` lists under tests/
+and a tree written from the same index does not record — so an intent-to-add entry is refused
+whatever the working tree holds for it, one a rename pairs with a deleted tracked file and one
+whose working-tree copy is deleted included.**
+
+*Instance that earned it:* the first-contact review of the units landed since round 4
+(a private review record): the clause above found intent-to-add entries as
+`git diff --diff-filter=A`, a working-tree view. `mv` a suite and `git add -N` the new name, and
+`diff` reports a rename, the filter lists nothing, and the tool wrote 25 suites where both a
+plain commit and `commit -a` hold 24; `git add -N` a new suite and `rm` it, and `diff` reports a
+deletion, and `--check` said "stale" instead of refusing.
+
+- Site derivation: `_intent_to_add` is the one read of intent-to-add, and
+  `refuse_unresolved_index` its only caller (after unmerged entries, which `write-tree` refuses).
+  `write-tree` runs on a copy of the index into a scratch object directory, so the engine's index
+  and objects are untouched. The other working-tree `diff` of tests/, `unstaged_tests`, pins
+  `--no-renames`, so a renamed file's old path is named as left out.
+- Pin (index-read clause): `tests/py/test_count_tool_ita_index_read_certify.py` (landed by the commit that carries it; certify `stuck/20261026T015652Z-certify-certify-the-count-tool-refuses-an-intent`, red at `4d3b8fd` 4 of 7, green at `e07141c` 7 of 7).
+
 **Amendment, 21 Oct 2026 (the summary-line clause, amending the index clause): the tool and the
 gate read the collected count only from pytest's final summary line, matched whole — a node id
 or any other line of the output that contains "N tests collected" never supplies the figure, and
@@ -591,6 +632,55 @@ cleared session woke hourly only to decline.
   clock-reset case runs DELAY=4); `tests/test-setup-wire.sh` pins that `--wire-claude` emits
   `async`/`asyncRewake`/`timeout`/`rewakeMessage` and is idempotent.
 
+## `the-quote-mask-reads-heredoc-bodies-as-bash-reads-them`
+
+**`quote-mask.py` masks a command the way bash lexes it, heredoc bodies included — a `qq` write-verb
+inside a body never reaches command position in the mask and a quote inside a body never masks code
+after the terminator — and a scan whose output is not its input's length raises `MaskMismatch`, the
+CLI printing nothing for such a command so the caller reads no match and errs toward waking once
+more rather than toward suppressing a wake.**
+
+*Instance that earned it:* the 3a10cd1 port predated the estate mask's 2026-10-26 heredoc reader, so
+a `cat > f <<'EOF'` body with a line starting `qq update` folded to `;qq update …`, matched the
+command-position grep, and absorbed the session's genuine activity at the next Stop (and an
+apostrophe in a body masked a real write after the `EOF`).
+
+- Site derivation: the single scanner in `quote-mask.py` (`_scan` and `_bodies`), reached only from
+  the CLI `main()` and its one grep consumer `own_checkpoint_since` in `idle-autosave.sh`; the
+  length check is in `_run`, the refusal in `main()`.
+- Check: none yet — certify pending.
+
+## `switching-off-the-idle-autosave-stands-down-the-armed-waiter`
+
+**A Stop run with `QQ_IDLE_AUTOSAVE_DISABLE=1` performs the stored-PID supersede for its session
+(cmdline-verified, never by pattern) before exiting 0, so turning the autosave off mid-session never
+leaves the waiter armed by the previous Stop to wake the session later.**
+
+*Instance that earned it:* the disable exit was the hook's first act, ahead of the supersede block,
+so the user RELEASE-NOTES tells to set `QQ_IDLE_AUTOSAVE_DISABLE=1` to turn it off was still woken
+once more, up to ~50 minutes later, by the waiter armed before the config edit.
+
+- Site derivation: the one path from sourcing `qq-config.sh` to the disable exit in
+  `idle-autosave.sh`; the supersede is read-only on state, so a disabled hook still creates no
+  state dir (pinned by `tests/test-idle-autosave.sh` (g), which this sentence does not re-pin).
+- Check: none yet — certify pending.
+
+## `an-armed-idle-waiter-stands-down-when-the-autosave-is-switched-off`
+
+**An armed idle-autosave waiter re-reads `QQ_IDLE_AUTOSAVE_DISABLE` (environment over config file,
+the file through `qq-config.sh`'s own parser) after every poll, so it never exits 2 once the key
+it would resolve at that moment is `1`, whether or not another Stop runs in its session.**
+
+*Instance that earned it:* eb06838 moved the supersede ahead of the disable exit, which stands an
+armed waiter down only when a LATER Stop runs; the waiter's poll loop never read the key again, so
+a user who set `QQ_IDLE_AUTOSAVE_DISABLE=1` in the config file while a session was already idle was
+still woken once more, up to ~50 minutes later (review round 2, probe-disable-r2.sh P3: rc 2).
+
+- Site derivation: every path in `idle-autosave.sh` from arming (`echo "$$" > "$pidf"`) to the
+  `exit 2` passes through the poll loop's one `break`, so the loop body's check after each `sleep`
+  is the one site; the start-of-hook disable exit uses the same `disabled_now`.
+- Check: none yet — certify pending.
+
 ## `digest-order-is-the-same-on-every-host`
 
 **What `qq` prints, and what a test of it concludes, does not depend on which coreutils or which
@@ -634,3 +724,244 @@ killed by the hook.
   that test's start, not this class: the loser renames its `.run` into place before the live
   unit's bash has opened its own, so the live unit runs `true`; waiting for the live job's start
   line before racing turns it 0 of 5 red from 2 of 3.
+
+## `the-shell-and-python-loaders-name-the-same-config-file`
+
+**For every value of `HOME`, `QQ_CONFIG`, `XDG_CONFIG_HOME` and `QQ_REDACT_FILE`, every shell
+function that builds a path of the config-file family names the same file the python `Config`
+resolves for it, a leading `~` or `~/` expanded against `HOME` on both sides.**
+
+*Instance that earned it:* 34d19e1 taught `Config._bootstrap_config_path` to expand a literal
+`~` and said "the shell side expands it too", which was false. With `QQ_CONFIG='~/qq.conf'`
+reaching hooks unexpanded (a settings.json `env` value, a systemd `Environment=` line), `qq config
+set QQ_IDLE_AUTOSAVE_DISABLE 1` wrote `$HOME/qq.conf` and reported success while every bash entry
+point read `./~/qq.conf` under its cwd, so the armed idle waiter still exited 2 (fix-review
+qq-idle-autosave-2026-10 second leg, `tests/review-instruments/idle-autosave-switch-off-routes-probe.sh`
+R5: rc 2 after 8 s; rc 0 after 1 s with the fix) and every other key in that file was ignored by bash.
+
+- Site derivation: `derived_shell_sites()` in `tests/py/test_config_path_parity.py` — every
+  function in a `git ls-files` shell file outside `tests/` (`*.sh` or an `sh`/`bash` shebang) whose
+  non-comment lines expand `QQ_CONFIG`, `XDG_CONFIG_HOME` or `QQ_REDACT_FILE`; today
+  `qq-config.sh:_qq_config_file` and `qq-redact.sh:_qq_redact_file`, both through `_qq_untilde`.
+- Check: `tests/py/test_config_path_parity.py` (site set equals the parity table; 768-case matrix
+  of bash vs `Config.config_path` / `get_path("QQ_REDACT_FILE")`; a `~/` QQ_CONFIG key reaches
+  bash), red at ce958e0 (481 failed with both loaders reverted, 240 with `qq-redact.sh` alone).
+  The matrix walks every family variable at `""` (pinned by
+  `test_every_family_variable_is_walked_empty`), and
+  `test_an_empty_qq_redact_file_switches_shell_withholding_off` asks `qq_redact_active` /
+  `qq_slug_redacted` with a populated default list on disk; `tests/test-config-family-path-parity.sh`
+  (the certifier's check, 42 cases) asks the same both ways. Red at 0f35e8c: 97 failed (96 matrix
+  cells with `QQ_REDACT_FILE=""`, plus the empty-case behaviour subtest), and the shell check 41/1,
+  because `_qq_redact_file` read `${QQ_REDACT_FILE:-…}` and named the default list where `Config`
+  names no file. The fix reads `${QQ_REDACT_FILE-…}`; `QQ_CONFIG` and `XDG_CONFIG_HOME` keep `:-`
+  because `Config` reads their empty value as unset too.
+- Not covered, on purpose: `~user` forms, on which `config.py` is itself split
+  (`_bootstrap_config_path` keeps them literal, `_expanduser` expands them); bash keeps them literal.
+  Nor path keys other than these three that bash reads raw (e.g. `QUINTESSENCE_DIR` in `qq-lib.sh`)
+  — SUPERSEDED: those are now held by `every-shell-site-of-a-path-key-names-the-path-config-resolves`.
+
+## `every-shell-site-of-a-path-key-names-the-path-config-resolves`
+
+**For every `path` or `csvpath` key in the `KEYS` registry, and for the XDG bases `config.py`
+expands into a path default, every shell site outside `tests/` that reads the key names the path
+`Config.get` resolves for the same environment and config file, a leading `~` or `~/` expanded
+against `HOME` on both sides.**
+
+*Instance that earned it:* the sibling of `the-shell-and-python-loaders-name-the-same-config-file`,
+whose "Not covered" line named it. With `QUINTESSENCE_DIR=~/notes` in the config file (`QQ_ALLOW_RELOCATE=1
+qq config set QUINTESSENCE_DIR '~/notes'` wrote it and returned 0) or in an unexpanded settings.json
+`env` / systemd `Environment=` value, python used `$HOME/notes` while `qq-lib.sh`'s `QDIR`,
+`memory-commit.sh`'s `QQ_MEMDIR` and every `QQ_STATE_DIR` reader named `./~/notes` under the hook's
+cwd (fix-review qq-idle-autosave-2026-10 first-contact, `path-key-tilde-sibling-probe.sh`). The
+repair is one normalisation, `_qq_untilde_path_keys` in `qq-config.sh`, over both layers; and
+`prime-primary-sources.sh`, the one site that never sourced `qq-config.sh`, now does.
+
+- Site derivation: `derived_sites()` in `tests/py/test_path_key_tilde_parity.py` — every non-comment
+  line of a `git ls-files` shell file outside `tests/` (`*.sh` or an `sh`/`bash` shebang) that expands
+  a key of `KEYS` with type `path`/`csvpath` or an XDG base matched by `resolve_raw("XDG_…")` in
+  `quintessence/config.py`; the normalised key lists are compared with the same registry.
+- Check: `tests/py/test_path_key_tilde_parity.py` — the key lists equal the registry; every key, at
+  seven value shapes (five csv shapes for `csvpath`), in the env and the config-file layer, under two
+  spellings of `HOME`, reaches bash as `Config.get` resolves it; every derived `${KEY:-…}`/`${KEY:=…}`
+  site expression evaluated by bash equals `Config.get(KEY)`; and every site file sources
+  `qq-config.sh` before its first site, or is sourced only by files that do. `setup.sh` is held to
+  this like every other file. This bullet first exempted it, on the strength of its own `_untilde`
+  loop; the second instance below is what that exemption let through, and e4a3aae removed it from
+  the test. Red at d61c812: 490 failed of 4 tests and 824
+  subtests. Mutations, each red alone: the normalisation call removed (488), `prime-primary-sources.sh`'s
+  source removed (1), one key dropped from the list (21), the csvpath list emptied (33), the XDG bases
+  dropped (53).
+- Not covered, on purpose: `~user` forms (python defers them to the stdlib, which expands only an
+  existing user; bash keeps them literal), and the EMPTY value, on which the engines split on
+  defaulting rather than on `~` (`Config` returns `''` for an empty `QUINTESSENCE_DIR`; bash's `:-`
+  takes `$HOME/quintessence`).
+
+- *Second instance, from the layer this row's first check exempted:* `setup.sh` read
+  `QUINTESSENCE_DIR` and `QQ_MEMDIR` from the environment alone, and the check above let it, on the
+  strength of its own `_untilde` loop. A store moved with `qq config set QUINTESSENCE_DIR …` was then
+  named `$HOME/quintessence` by a re-run of the installer, and `qq init` made a fresh empty store
+  there (certify 20261101T185146Z, not held at 6ec8def3, 6 of 1173 red). `setup.sh` now sources
+  `qq-config.sh` after taking its explicit-in-the-environment flags, so it is held to the same rule
+  as every other site, and the exemption is gone.
+- Site derivation (second check): `tests/test-shell-path-site-parity.sh`, step 1. The keys come from
+  `KEYS` (type `path`/`csvpath`), the XDG bases from `re.findall(r"\bXDG_[A-Z_]+\b")` over
+  `quintessence/config.py`, and the shell files from `git ls-files` outside `tests/` (`*.sh` or a
+  bash/sh shebang). A site is any non-comment line that reads one of those names through a value
+  expansion. A presence test (`${K+x}`) reads no value and is not a site, in this check and in
+  `derived_sites()` above.
+- Check (second): `tests/test-shell-path-site-parity.sh`, the certifier's own check, carried as it
+  was written. It runs each site in its script's own context (loaders sourced, earlier assignments
+  replayed, functions called) under `env -i` with a throwaway HOME, and compares it with
+  `Config().get` over 51 environment/config-file cases. Red at 7aed6ca, with the `setup.sh` fix
+  reverted: 6 failed of 1173, all of them `setup.sh:22`/`:23` with the key in the config file.
+  Red at d61c812: 123 failed. Mutation of the fix alone (`setup.sh`'s `. "$HERE/qq-config.sh"`
+  replaced by `:`): this check 6 failed, and
+  `test_every_site_file_normalises_before_its_first_site` red on `setup.sh`.
+- Check (third): `tests/test-certify-path-key-shell-sites.sh`, which runs
+  `tests/review-instruments/certify-path-key-shell-sites.py`. That certify used to skip `setup.sh` in
+  the config-file layer, on the ground that the installer defers to the file through `qq config get`.
+  A scratch-HOME install at 7aed6ca refuted the ground, and the skip kept the certify green under the
+  mutation above. The skip is gone. Under that mutation the certify now reports 10 disagreements, all
+  at `setup.sh:29`/`:30` with the key in the config file; at the tip it reports 2178 agreements and 0
+  disagreements.
+- What the config file holds after an install. The row is about which path a site NAMES, and it
+  does not promise that the file keeps the user's spelling. A file holding
+  `QUINTESSENCE_DIR=~/my-store` comes out of `setup.sh` holding `$HOME/my-store` written out in full,
+  plus a `QQ_MEMDIR=$HOME/.quintessence-memory` line. The writer is `qq init`, which `setup.sh` calls
+  in step 2 (`quintessence/admin.py` `init`). It records `config.get_path("QUINTESSENCE_DIR")`,
+  the resolved path, and records `QQ_MEMDIR` because `setup.sh` exports that default into its
+  environment. `setup.sh`'s own `_cfg_pref` finds both keys set and writes nothing. Bare `qq init`
+  rewrites a `~` value in the same way. Both spellings name the same directory under one `HOME`; a
+  config file shared across homes loses the `~`.
+
+## `a-tsk-unit-executes-the-runner-its-own-start-wrote`
+
+**A unit `tsk run` starts executes the runner script that same start wrote, and the job's
+`.run`/`.cmd` records describe that start, whatever any other start of the same name does: no
+file a start writes before `systemd-run` has created its unit is one another start's unit reads
+or another start's records hold.**
+
+*Instance that earned it:* ledger D122, D271 and D272. A start that lost the deep duplicate-start
+race (a manager mis-reporting the live unit as inactive) renamed its runner onto the shared
+`$STATE/<name>.run` the live unit executes, inside the winner's fork-to-first-open gap, and wrote
+`.cmd` over the winner's: the refused caller's command ran under the winner's name. Test 4k's
+end-to-end marker went red only when the loser won the open (1/200 under the stub, more under
+load), and the stress lane counted the substitution and left it out of its exit status.
+
+- Site derivation: the files the unit reads are named by `tsk run`'s `systemd-run` argv (the
+  runner, which writes `.log`/`.rc`/`.done` itself); the files a start writes before
+  `systemd-run` are the redirect and `mv` targets above that call in `tsk`'s `run` branch —
+  at this fix `$tmp` (`<name>:run.tmp.<pid>`), `$cmdtmp` (`<name>:cmd.tmp.<pid>`) and `$runner`
+  (`<name>:runner.<pid>.<EPOCHREALTIME>`), all in the `:` namespace no job name can reach;
+  `.cmd` and `.run` are written only after `systemd-run` returns.
+- Check: `tests/test-tsk.sh` 4k — after the lied-manager race, the file the live unit's
+  `ExecStart` names (read from `systemctl --user show`, not from tsk's own record) still holds
+  the winner's command, `.cmd` still names it, the `.run` record's inode is unchanged, and the
+  stop marker reads 143. Red at 736270e (3 of 76: the unit's runner and `.cmd` held the loser's
+  `true`, the `.run` inode moved), deterministically, where the end-to-end marker had passed.
+  Mutations, each red alone: the unique runner path reverted to `$STATE/<name>.run` with the
+  `.run` record write removed (the unit's runner holds the loser's command; with the new
+  `install_failed` cleanup the loser also removes the shared `.run`, 4 failed); `.cmd` written
+  directly before `systemd-run` (1 failed). `tests/stress/stress-lied-manager-race.sh` now fails
+  on a substitution (ceiling 0): 200 iterations at load average ~21 on 2026-11-02, 1 substitution
+  (red) with main's `tsk` at 736270e and 0 with the fix.
+- Not covered, on purpose: a start SIGKILLed after writing its runner and before `systemd-run`
+  leaves that runner until the next successful start of the name (or `tsk clean`) removes it;
+  no age sweep touches runners, since a live job's runner is as old as the job.
+
+## `a-test-oracle-over-paths-does-not-read-the-scratch-directory-name`
+
+**A test's oracle over paths must not depend on the ambient scratch directory's name: an
+assertion about which fixture file a path names compares the part of the path the fixture
+created (its basename, or a name relative to the fixture base), or a nonce name that cannot
+occur in TMPDIR, never a fixed word searched for anywhere in the full path.**
+
+*Instance that earned it:* ledger D1344. `test_long_lived_instance_sees_a_head_written_after_first_call`
+asserted that `"late"` occurred in no full hit path, so it was red at b1130d8 under any TMPDIR
+containing `late` (a worker scratch named `...later-round...`) and green under a neutral one.
+
+- Site derivation: the assertions in `tests/py/` that apply `in` to a hit path or to a set of them,
+  found with `grep -nE 'in (p|h\["path"\]) for' tests/py/*.py` at 61e15ec. That found six
+  assertions: `test_search.py` (the `late` pair above, plus the two `secret-topic` assertions in
+  `TestRedaction`) and `test_searchcompose.py` (`ptopic` and `u.md` in
+  `test_results_carry_the_correct_store_label`, which a TMPDIR containing either word made
+  vacuously green). Each now compares `os.path.basename` against the fixture's own file name.
+  The redaction tests also use `_nonce_slug`, because the product's matcher
+  (`SearchIndex._slug_redacted`) matches a redact entry as a substring of the whole path, so a
+  fixed slug under a TMPDIR of the same name redacts every hit, the public fixture included.
+- Check: running the two files under a TMPDIR whose name holds the word. Red at 61e15ec with
+  `TMPDIR=<scratch>/scratch-later-round` (1 failed, the `late` test) and with
+  `TMPDIR=<scratch>/secret-topic-x` (2 failed, both redaction tests); green after the change
+  under those two, under `ptopic-u.md-x`, and under a neutral name (89 passed each time).
+  Mutations, each red alone: the test writes `early.md` instead of `late.md` (1 failed, so the
+  basename oracle still sees the file's absence); the redact file lists a slug other than the
+  nonce (2 failed).
+- Not covered, on purpose: no lint enforces the shape. The derivation is the grep above, re-run
+  by hand. In production the redaction matcher's substring rule is applied to a HOME-relative
+  path, and whether it should stay a substring rule is the open redaction-scope question in
+  `_filter_redacted`'s docstring, not something this test change decides.
+
+## `a-reader-that-closes-early-ends-every-entry-point-with-141-and-no-message`
+
+**Every Python entry point in this tree ends through `quintessence.pipeexit.run`, so when the
+reader of its stdout closes early it exits 141 with nothing on stderr, on Python 3.13 and 3.14
+alike, whichever way its `main` ends — return, `sys.exit`, or an exception.**
+
+*Instance that earned it:* CI on GitHub's ubuntu-26.04 runner (system Python 3.14), run
+`41907305771` at the published 883712f: `test_menu_piped_into_a_closing_reader_dies_quietly_like_bash`
+read exit 120, and `qq menu | <closing reader>` printed `Exception ignored while flushing
+sys.stdout: BrokenPipeError`. A write the pipe cannot take whole returns once its tail fits stdout's
+buffer, and 3.14 raised `io.DEFAULT_BUFFER_SIZE` from 8 KiB to 128 KiB: the menu's one ~112 KB
+write returned, `main()` returned 0, and the EPIPE surfaced in the interpreter's shutdown flush,
+outside every handler. On 3.13 the same write raised inside `main()`, where `qq`'s `except
+BrokenPipeError` caught it, so the suite was green on the author's host — but 3.13 has the same
+hole for a write a few hundred bytes past the pipe (66,000 bytes into a 64 KiB pipe returns on
+both). `qq` was the only entry point that handled EPIPE at all, and none flushed inside a handler.
+
+- Site derivation: every git-tracked file outside `tests/` whose module body holds an
+  `if __name__ == "__main__":` block, parsed with `ast` (extensionless entry points included).
+  At this change that is 17 files: the repo-root scripts and `tools/*.py`.
+- Check: `tests/py/test_pipeexit.py`. `TestEveryEntryPointEndsThroughPipeexit` derives the entry
+  points through `tests/py/_treefiles.py` and requires each `__main__` block to end in
+  `pipeexit.run(...)` with only imports and `sys.path` calls before it (its control refuses
+  `sys.exit(main())`, a bare `main()`, work before the call, an `else:` and a different `run`).
+  `TestRunUnderAClosedReader` runs `pipeexit.run` under a reader that takes one byte, for a write
+  just past the pipe (returns, `sys.exit(3)`, raises) and four pipes (one write, many prints):
+  141 and empty stderr each time, and with a reader that drains everything the main's own exit
+  (0, 3, 1 with its traceback). Run it under every supported Python; 3.13.5 (system) and 3.14.6
+  (uv) both pass. Red at 7499986 in a plain copy on both Pythons: the derivation test names the
+  entry points, and on 3.14 `test_dispatcher`'s menu test reads 120. Mutations, each red alone
+  on both Pythons unless noted: the flush in `run`'s `finally` removed (the three near-pipe
+  cases; on 3.14 also the menu test); the repoint to `/dev/null` removed (the near-pipe cases;
+  on 3.14 also many-prints and the menu test); `qq`'s block back to `sys.exit(_main_guarded())`
+  (the derivation test and the menu test).
+- Not covered, on purpose: inline Python a shell script runs. `qq-redact.sh`'s `python3 -c` writes into a
+  command substitution, which reads to EOF, so no reader closes early; `setup.sh`'s `python3 - <<'PY'`
+  writes a few lines to the installer's own stdout, where bash takes the SIGPIPE first. And
+  `refs-resolve.py`'s "never fail the caller" now means exit 0 except 141 under a closed reader;
+  its one caller, `memory-commit.sh`, sends its stdout to /dev/null.
+
+## `the-suite-derives-the-same-files-with-or-without-git`
+
+**A test that derives its sites from the engine tree lists the tree through
+`tests/py/_treefiles.engine_files`, which names the same files in a git checkout (`git ls-files`)
+and in a plain copy such as an export or a tarball (a walk that leaves out `.git` and what the
+top-level `.gitignore` names).**
+
+*Instance that earned it:* the release gate of 2026-11-04 ran `tests/run.sh` in the gated export,
+before its `git init`: `test_config_path_parity.py` and `test_path_key_tilde_parity.py` called
+`git ls-files`, which exited 128, and `test-py.sh` failed with 3 errors on a tree that was correct.
+
+- Site derivation: `grep -rn 'ls-files' tests/py/*.py` — at this change the two parity tests
+  (now through `engine_files`), the count-gate tests (which build their own checkout fixtures and
+  ask git about an index on purpose) and `test_refsresolve.py` (which runs git in a fixture repo).
+  `tests/test-shell-path-site-parity.sh` already walks the tree when git lists nothing.
+- Check: `tests/py/test_treefiles.py`. In a checkout the walk equals git's tracked-and-on-disk
+  files plus its untracked-not-ignored ones; the listing holds `qq`, `qq-config.sh` and
+  `quintessence/cli.py` and no `__pycache__` or `.git/` path; a fixture's `.gitignore` drops
+  `*.log`, `*.pyc` and a non-`.pyc` file inside `__pycache__/`. Red at 7499986: the two parity
+  tests in a plain copy (3 errors, `ls-files` exit 128). Mutation: the walk applies no
+  directory pattern (the fixture test, red).
+- Not covered, on purpose: `.gitignore` syntax beyond one fnmatch pattern per line, with a
+  trailing `/` for directories (no negation, no anchored or nested-directory patterns), and
+  nested `.gitignore` files; the checkout comparison fails if this repo's file outgrows that.

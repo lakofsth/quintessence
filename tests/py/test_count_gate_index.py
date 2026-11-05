@@ -270,6 +270,31 @@ class TestTheCountIsTheIndex(unittest.TestCase):
         self._assert_refused_untouched(eng, rel, "an intent-to-add test file")
         self.assertIn(suite, self._tool(eng).stderr)
 
+    def _suite(self, eng):
+        return os.path.join("tests", sorted(f for f in os.listdir(os.path.join(eng, "tests"))
+                                            if f.startswith("test-") and f.endswith(".sh"))[0])
+
+    def test_an_intent_to_add_suite_a_rename_pairs_with_its_old_name_is_refused(self):
+        eng = self._copy()
+        old, new = self._suite(eng), os.path.join("tests", "test-zz-index-renamed.sh")
+        os.rename(os.path.join(eng, old), os.path.join(eng, new))
+        _git(eng, "add", "-N", "--", new)
+        assert "R" in _git(eng, "diff", "--name-status", "-M", "--", "tests"), \
+            "probe precondition: diff does not pair the rename"
+        objects = _git(eng, "count-objects", "-v")
+        self._assert_refused_untouched(eng, new, "an intent-to-add suite renamed from a tracked one")
+        self.assertEqual(_git(eng, "count-objects", "-v"), objects,
+                         "the refusal wrote objects into the engine's repository")
+
+    def test_an_intent_to_add_suite_deleted_from_the_working_tree_is_refused(self):
+        eng = self._copy()
+        suite = os.path.join("tests", "test-zz-index-ita-gone.sh")
+        _write(os.path.join(eng, suite), PROBE_SUITE)
+        _git(eng, "add", "-N", "--", suite)
+        os.remove(os.path.join(eng, suite))
+        assert self._status(eng, suite).startswith(" D"), "probe precondition: not deleted"
+        self._assert_refused_untouched(eng, suite, "an intent-to-add suite deleted from the tree")
+
     def test_an_unmerged_test_file_is_refused_not_counted(self):
         eng = self._copy()
         rel = os.path.join("tests", "py", "test_atomicio.py")

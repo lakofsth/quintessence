@@ -369,9 +369,10 @@ rm -f "$TSK_STATE/$J-norun.run"
 # 4k. a LOST same-name run race must not disarm the live job (round-2 F-A / round-3 F1):
 #     stateful stubs recreate the one-roundtrip window — systemctl lies "inactive" exactly
 #     once so the raced run passes the duplicate check, then systemd-run fails "unit exists".
-#     The loser must keep the live job's .run (stop-marker stays armed) and must have
-#     replaced the runner by RENAME (new inode), never truncating the inode the running
-#     bash may still be reading.
+#     The loser must keep the live job's .run (stop-marker stays armed) and must not touch
+#     it at all: each start writes its runner to a path of its own and the shared records only
+#     after its unit exists (the unique runner path, 2026-11-02; it used to rename its runner
+#     onto the shared .run, and the inode pin here asserted that rename).
 racedir="$TMP/racestub"; mkdir -p "$racedir"
 cat > "$racedir/systemctl" <<STUB
 #!/bin/bash
@@ -384,14 +385,29 @@ printf '#!/bin/bash\nexit 1\n' > "$racedir/systemd-run"
 chmod +x "$racedir/systemctl" "$racedir/systemd-run"
 "$TSK" run "$J-race" -- sleep 30 >/dev/null 2>&1
 inode_before=$(ls -i "$TSK_STATE/$J-race.run" | awk '{print $1}')
+_4k_exec=$(systemctl --user show -p ExecStart --value "tsk-$J-race.service" 2>/dev/null | sed -n 's/^{ path=\([^ ;]*\) ;.*/\1/p')
 PATH="$racedir:$PATH" "$TSK" run "$J-race" -- true >/dev/null 2>&1 && no "raced run exited 0" || ok "raced run still refused"
 [ -f "$TSK_STATE/$J-race.run" ] && ok "lost race keeps the live job's .run" || no "lost race deleted the live job's .run"
 if [ -f "$TSK_STATE/$J-race.run" ]; then
   inode_after=$(ls -i "$TSK_STATE/$J-race.run" | awk '{print $1}')
-  [ "$inode_before" != "$inode_after" ] && ok "runner rewrite is rename, not in-place truncation" || no "runner truncated in place (inode $inode_before unchanged)"
+  [ "$inode_before" = "$inode_after" ] && ok "the loser left the live job's .run record untouched" || no "the loser replaced the live job's .run record (inode $inode_before -> $inode_after)"
 else
   no "runner missing — inode pin unverifiable"
 fi
+#     the-unit-executes-the-runner-its-own-start-wrote: the file the live unit's ExecStart
+#     names still holds the WINNER's command after the lost race, and so does .cmd. Read from
+#     the unit itself (systemctl show), not from tsk's own record of where the runner is, so
+#     the check holds whatever tsk believes. Before the unique runner path the loser renamed
+#     its runner onto the shared path the unit executes: this read `true`, deterministically,
+#     where the end-to-end marker below only went red when the loser won the open (D122).
+if [ -n "$_4k_exec" ] && grep -q 'sleep 30' "$_4k_exec" 2>/dev/null && ! grep -q '( true )' "$_4k_exec" 2>/dev/null; then
+  ok "the live unit's runner still holds the winner's command after a lost race"
+else
+  no "the live unit's runner ($_4k_exec) holds the loser's command after a lost race"
+fi
+grep -qx 'sleep 30' "$TSK_STATE/$J-race.cmd" 2>/dev/null \
+  && ok "the live job's .cmd still names the winner's command" \
+  || no "the live job's .cmd names the loser's command ($(cat "$TSK_STATE/$J-race.cmd" 2>/dev/null))"
 "$TSK" stop "$J-race" >/dev/null 2>&1
 [ -f "$TSK_STATE/$J-race.done" ] && [ "$(cat "$TSK_STATE/$J-race.rc" 2>/dev/null)" = "143" ] \
   && ok "stop after a lost race still marks (end-to-end)" || no "stop after lost race left no marker"

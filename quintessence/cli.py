@@ -23,7 +23,7 @@ from typing import Optional
 
 from . import authgate
 from .config import Config
-from .findings import FindingsFile, parse_line
+from .findings import RATIFY_CHANNEL, FindingsFile, parse_line
 from .heads import count_update_markers, head_meta, legacy_brief, stamp_datetime, stamp_of
 from .refsview import RefsView
 from .store import Store, StorePathError
@@ -403,6 +403,36 @@ def _ready(cmd: str) -> str | None:
     return cmd if _READY_CMD_RE.fullmatch(cmd) else None
 
 
+_PROPOSED_CHANNEL_RE = re.compile(r" pending ratification: [^;]*\(text channel: ([^)]*)\)")
+
+
+def _proposed_channel(line: str, verb: str) -> str:
+    """The text channel a PROPOSED write line names for its verb. It is read before the line's
+    first `; text: `, so the untrusted text after it cannot name one. A line written before
+    lines named their channel falls back to findings.RATIFY_CHANNEL, the table the renderer
+    writes from."""
+    head = line.split("; text: ", 1)[0]
+    m = _PROPOSED_CHANNEL_RE.search(head)
+    return m.group(1) if m else RATIFY_CHANNEL.get(verb, "")
+
+
+def _bash_quote(text: str) -> str:
+    """`text` as ONE bash word that expands to exactly `text`: a $'...' string whose printable
+    characters stand as themselves and whose every other character is spelled as its UTF-8 bytes
+    (\\xHH), so a ' in the text cannot end the quote and no control byte of an untrusted text
+    reaches the terminal raw. A NUL cannot be spelled on argv; the caller refuses it.
+    INVARIANTS.md: a-printed-argv-ratification-passes-the-text-whole."""
+    out = []
+    for ch in text:
+        if ch in ("\\", "'"):
+            out.append("\\" + ch)
+        elif ch.isprintable():
+            out.append(ch)
+        else:
+            out.append("".join(f"\\x{b:02x}" for b in ch.encode("utf-8")))
+    return "$'" + "".join(out) + "'"
+
+
 def render_findings_next(store: Store, config: Config, findings: FindingsFile) -> str:
     """Port of qq's `findings_next`: full adjudication context for the topmost pending finding
     (findings_render order: TIER1 then XREF then AUDIT then SALIENCE). Uses the STRUCTURED
@@ -460,7 +490,7 @@ def render_findings_next(store: Store, config: Config, findings: FindingsFile) -
         return out
 
     unparsed_proposal = False
-    bare_new = False
+    argv_only = None   # (verb, head, text) of a PROPOSED write whose verb reads no stdin
     if finding.cls == "PROPOSED write":
         # Decided by the marker, never by parse success: the generic branch's backtick
         # extraction must not read a line whose text an untrusted writer chose.
@@ -468,13 +498,14 @@ def render_findings_next(store: Store, config: Config, findings: FindingsFile) -
         # other verb on a PROPOSED line was not written by it (a-ready-proposed-verb-is-a-gated-verb).
         if ({"verb", "head"} <= finding.fields.keys()
                 and finding.fields["verb"] in authgate.GATED_VERBS):
-            cmds = [f"qq {finding.fields['verb']} {finding.fields['head']}"]
-            if finding.fields["verb"] == "new":
-                # `qq new <head>` with no essence succeeds and writes the placeholder, so the
-                # bare form is not a ready command: the text goes on argv
-                # (a-ratification-never-drops-the-proposed-text).
+            verb, head = finding.fields["verb"], finding.fields["head"]
+            cmds = [f"qq {verb} {head}"]
+            # The bare `qq <verb> <head>` can carry the text only on stdin, so it is offered as
+            # ready only when the channel the line names includes stdin; an argv-only verb
+            # gets its argv form instead (a-bare-ratify-command-is-ready-only-on-a-stdin-channel).
+            if "stdin" not in _proposed_channel(line, verb):
                 cmds = []
-                bare_new = True
+                argv_only = (verb, head, finding.fields.get("text"))
         else:
             cmds = []
             unparsed_proposal = True
@@ -485,10 +516,15 @@ def render_findings_next(store: Store, config: Config, findings: FindingsFile) -
     if unparsed_proposal:
         out += ("  (no ready command: this PROPOSED write line did not parse, or names a verb "
                 "outside the gated set, so none is offered)\n")
-    if bare_new:
-        out += (f"  (no ready command: qq new takes the text as its argv, and without it writes "
-                f"a placeholder essence; run: qq new {finding.fields['head']} '<the proposed "
-                f"text, decoded>')\n")
+    if argv_only and _ready(f"qq {argv_only[0]} {argv_only[1]}"):
+        verb, head, text = argv_only
+        out += (f"  (no ready command: qq {verb} reads its text from argv only, so the bare form "
+                f"cannot carry it; the line below passes the proposed text as one argv element, "
+                f"quoted for bash – it is the untrusted proposal: read it before running)\n")
+        if isinstance(text, str) and "\0" not in text:
+            out += f"  run: qq {verb} {head} -- {_bash_quote(text)}\n"
+        else:
+            out += "  (the proposed text cannot be passed on argv: it holds a NUL byte)\n"
     for c in cmds:
         out += f"  {c}\n"
     out += "  or: edit the source file directly, then re-run: qq check --write\n"

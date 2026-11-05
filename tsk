@@ -57,6 +57,10 @@ stash_back(){   # $1 = job name — put a stashed previous result back where rea
 }
 install_failed(){   # $1 = job name, $2 = message
   systemctl --user is-active --quiet "$(unit "$1")" || rm -f "$STATE/$1".{run,cmd}
+  # This attempt's own runner and cmd temp are never a live unit's: the unit only ever
+  # executes the unique runner ITS start wrote, so removing ours cannot disarm a live job.
+  [ -n "${runner:-}" ] && rm -f "$runner"
+  [ -n "${cmdtmp:-}" ] && rm -f "$cmdtmp"
   # A failed start must not have destroyed the previous run's result. If the failure was a
   # lost deep race, the live winner rewrites these at its own exit — the newer truth anyway.
   stash_back "$1"
@@ -97,8 +101,9 @@ case "${1:-}" in
     # it, and `clean` removes it with the rest of the job's state.
     tmp="$STATE/$name:run.tmp.$$"   # ':' is FORBIDDEN in job names, so this glob namespace
                                     # can never collide with any job's state files
-    trap 'rm -f "$tmp"; stash_back "$name"' EXIT
-    trap 'rm -f "$tmp"; stash_back "$name"; exit 1' INT TERM
+    runner=""; cmdtmp=""   # set below; cleared once the unit owns them
+    trap 'rm -f "$tmp" ${runner:+"$runner"} ${cmdtmp:+"$cmdtmp"}; stash_back "$name"' EXIT
+    trap 'rm -f "$tmp" ${runner:+"$runner"} ${cmdtmp:+"$cmdtmp"}; stash_back "$name"; exit 1' INT TERM
     # Pre-flight: the previous run's RESULT is STASHED, not deleted — restored on any failed
     # or interrupted start, discarded once systemd-run succeeds. (Closes the D117 root note:
     # a failed start used to destroy a completed job's rc/done.) `.log` is deliberately NOT
@@ -139,8 +144,17 @@ case "${1:-}" in
     fi
     # (no live result + a stash on disk = a SIGKILLed start's stranded stash: it IS the
     # previous result — leave it armed for restore-or-supersede rather than discarding)
-    printf '%s\n' "$*" > "$STATE/$name.cmd"
-    runner="$STATE/$name.run"
+    # The-unit-executes-the-runner-its-own-start-wrote. Each start writes its runner to a
+    # path of its OWN (the ':' namespace, unique per start), and writes the shared .run/.cmd
+    # records only AFTER systemd-run has started its unit. A start that loses the deep race (a
+    # manager mis-reporting a live unit as inactive) therefore touches no file the live unit
+    # reads or the live job's records hold: it used to rename its runner onto the shared .run
+    # the live unit executes, inside the winner's fork-to-first-open gap, and the refused
+    # caller's command ran under the winner's name (ledger D122, D271; 1/200 under the stub).
+    cmdtmp="$STATE/$name:cmd.tmp.$$"
+    printf '%s\n' "$*" > "$cmdtmp" || install_failed "$name" "could not write the command record (nothing was started)"
+    runner="$STATE/$name:runner.$$.${EPOCHREALTIME/./}"
+    [ -e "$runner" ] && install_failed "$name" "runner path $runner already exists (nothing was started)"
     argv_q=$(printf '%q ' "$@")
     # STATE is interpolated into generated shell below; %q it like the argv, so a state dir
     # holding a quote or a dollar neither breaks the runner nor expands inside it (L7).
@@ -162,20 +176,34 @@ echo "[tsk] exit rc=\$rc \$(date -Is)"
 exit \$rc
 EOF
     chmod +x "$tmp" || install_failed "$name" "could not make runner script executable (nothing was started)"
-    # Rename, never truncate in place: a runner bash that survived a same-name race may
-    # still be reading its inode. CHECKED rename: on failure $runner still holds the
-    # PREVIOUS run's script, and proceeding would silently execute the wrong command.
+    # CHECKED rename into this start's own runner path: on failure there is no runner, and
+    # systemd-run must not be reached. (No other start writes this path, so no running bash
+    # can be reading the inode it replaces.)
     mv -f "$tmp" "$runner" || install_failed "$name" "could not install runner script (nothing was started)"
     # On failure: no state for a job that never started (.run present must MEAN started) —
     # UNLESS a same-name unit is live, i.e. this run lost the DEEP race (a manager that
     # mis-reported the live unit as inactive at the check above): deleting then would disarm
-    # the live job's stop-marker. Known residual, recorded not hidden: in that deep race the
-    # on-disk .run/.cmd describe the loser. The CONCURRENT-start race (two `run`s in flight
+    # the live job's stop-marker. In that deep race the loser has written nothing the live job
+    # reads or records (its runner and cmd temp are its own, removed by install_failed). The
+    # CONCURRENT-start race (two `run`s in flight
     # at once) is closed by the lock above and cannot reach this point; the previous result
     # is stashed, not destroyed, and install_failed restores it.
     systemd-run --user --unit "tsk-$name" --collect --quiet "$runner" \
       || install_failed "$name" "systemd-run failed"
+    started_runner="$runner"; runner=""   # the unit owns it now: no trap may remove it
     rm -f "$STATE/$name":prev.{rc,done}   # started: the stashed old result is superseded
+    # The records, now that this start's unit exists. .run present still MEANS started (stop
+    # gates its marker on it) and names the runner; checked, because a missing .run leaves a
+    # stopped job unmarked. Under the per-name lock, so no stop or clean can interleave.
+    mv -f "$cmdtmp" "$STATE/$name.cmd" && cmdtmp="" \
+      || echo "tsk: started, but could not record the command in $STATE/$name.cmd" >&2
+    printf '%s\n' "$started_runner" > "$STATE/$name.run" \
+      || { echo "tsk: tsk-$name STARTED but its .run record could not be written: tsk stop will not mark it done" >&2; exit 1; }
+    # Earlier starts' runners: no unit of this name was live (systemd-run just created one), so
+    # none of them is being read. A start killed before systemd-run leaves its runner until here.
+    for _r in "$STATE/$name":runner.*; do
+      [ -e "$_r" ] && [ "$_r" != "$started_runner" ] && rm -f "$_r"
+    done
     echo "started tsk-$name (log: $STATE/$name.log ; marker: $STATE/$name.done)"
     ;;
   status)
@@ -267,7 +295,7 @@ EOF
           exec 7>"$STATE/$n:run.lock" || continue
           flock -n 7 || continue
         fi
-        rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.* "$STATE/$n":prev.{rc,done}
+        rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.* "$STATE/$n":cmd.tmp.* "$STATE/$n":runner.* "$STATE/$n":prev.{rc,done}
       done
       exec 7>&- 2>/dev/null
       # Orphan temps have no .done (run's pre-flight rm removed it), so the loop above can
@@ -288,7 +316,7 @@ EOF
         exec 7>"$STATE/$n:run.lock" || die "cannot open start lock"
         flock -n 7 || die "job '$n' has a start in flight (or flock itself failed) — not cleaning"
       fi
-      rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.* "$STATE/$n":prev.{rc,done}
+      rm -f "$STATE/$n".{rc,done,cmd,log,run} "$STATE/$n":run.tmp.* "$STATE/$n":cmd.tmp.* "$STATE/$n":runner.* "$STATE/$n":prev.{rc,done}
     fi
     ;;
   *) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;

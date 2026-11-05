@@ -180,8 +180,8 @@ class TestComposedSearch(unittest.TestCase):
             self.assertEqual(by_store, {"project", "user"})
             project_paths = [h["path"] for h in hits if h["store"] == "project"]
             user_paths = [h["path"] for h in hits if h["store"] == "user"]
-            self.assertTrue(any("ptopic" in p for p in project_paths))
-            self.assertTrue(any("u.md" in p for p in user_paths))
+            self.assertIn("ptopic.md", {os.path.basename(p) for p in project_paths})
+            self.assertIn("u.md", {os.path.basename(p) for p in user_paths})
 
     def test_merges_globally_by_score_not_per_store(self):
         with tempfile.TemporaryDirectory() as base:

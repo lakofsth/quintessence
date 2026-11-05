@@ -6,6 +6,39 @@
 Changes that ask something of you, newest first. Everything else is in the commit log; this file
 is for the things you would want to know before or just after pulling.
 
+## Unreleased — config paths resolve the same in the shell scripts and in `qq`
+
+### What changed
+
+- **`~` in a config path now means your home in the shell scripts too.** Every hook and script that
+  reads a path key (`QUINTESSENCE_DIR`, `QQ_STATE_DIR`, `QQ_CONFIG`, `XDG_CONFIG_HOME` and the
+  rest; CONFIG.md marks them) expands a leading `~` or `~/` against `$HOME`, as `qq` itself always
+  did, and in each member of a comma-separated path list. Before, a value that reached a hook
+  unexpanded — from `qq config set`, a settings.json `"env"` block or a systemd `Environment=`
+  line, none of which expand `~` — named `./~/…` under the hook's working directory, so hooks read
+  and wrote somewhere other than the store `qq` used. `~user` is still left as written.
+- **`setup.sh` reads your config file before choosing the store.** A store or memory directory set
+  with `qq config set QUINTESSENCE_DIR …` (or `QQ_MEMDIR`) is now what a re-run of the installer
+  initialises and wires. Before, a re-run looked only at the environment, created an empty store
+  at `~/quintessence`, and pointed the engines at it.
+- **An empty `QQ_REDACT_FILE` turns redaction off in the shell scripts too.** CONFIG.md has always
+  said "Empty or absent means the filtering is off", and `qq` honoured it; the shell side read an
+  empty value as unset and kept withholding the topics in the default list.
+- **Every Python entry point now exits 141, quietly, when the reader of its output closes early**
+  (`qq menu | head -1`, say), on Python 3.14 as on 3.13, including `refs-resolve.py`, which used
+  to exit 0 always; its own caller, `memory-commit.sh`, discards its output.
+
+### What it asks of you
+
+- If you set a path with a literal `~` and things worked anyway, something was compensating —
+  most often a store at `./~/…` under a hook's working directory. Look for a directory literally
+  named `~` there; anything written into it since belongs in your real store.
+- If you moved your store with `qq config set` and later re-ran `setup.sh`, check for an empty
+  `~/quintessence` the installer may have created, and re-run `bash setup.sh` so it wires the
+  store your config names.
+- If you set `QQ_REDACT_FILE=` (empty) expecting the default list to keep applying, it no longer
+  does: point it at the list explicitly.
+
 ## Unreleased — idle-checkpoint autosave hook
 
 ### What changed

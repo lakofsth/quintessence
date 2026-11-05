@@ -18,7 +18,8 @@
 #
 # Config (dotenv ~/.config/quintessence/config or environment; env wins):
 #   QQ_REDACT_FILE        redact-slug list (default ${XDG_CONFIG_HOME:-~/.config}/quintessence/redact-slugs)
-#                         one entry/line; '#' comments; trailing '*' = prefix match; empty file = feature off.
+#                         one entry/line; '#' comments; trailing '*' = prefix match; empty file, or
+#                         QQ_REDACT_FILE set to the empty string, = feature off.
 #   QQ_WRITE_TRUSTED_MODEL  model trusted to author on the write path (default: empty — see
 #                         quintessence/config.py KEYS; read side consults this to
 #                         distinguish a known limited reader from an unknown session,
@@ -37,7 +38,14 @@
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/qq-config.sh" 2>/dev/null || true
 
 _qq_redact_file() {
-  printf '%s' "${QQ_REDACT_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/quintessence/redact-slugs}"
+  # `~` / `~/` expanded as config.py's get_path("QQ_REDACT_FILE") expands it (_qq_untilde, from
+  # qq-config.sh) — else a tilde path names ./~/... and the withheld list silently reads empty.
+  # `-`, not `:-`, on QQ_REDACT_FILE: set-but-EMPTY names no file, as Config answers '' for it
+  # ("Empty or absent means the filtering is off", CONFIG.md) — `:-` read it as unset and kept
+  # withholding from the default list. XDG_CONFIG_HOME keeps `:-`: empty means unset on both sides.
+  # INVARIANTS.md: the-shell-and-python-loaders-name-the-same-config-file.
+  local p="${QQ_REDACT_FILE-${XDG_CONFIG_HOME:-$HOME/.config}/quintessence/redact-slugs}"
+  if declare -F _qq_untilde >/dev/null; then _qq_untilde "$p"; else printf '%s' "$p"; fi
 }
 
 _qq_redact_entries() {   # cleaned entries (strip inline #comments, trim, drop blanks/comment lines)

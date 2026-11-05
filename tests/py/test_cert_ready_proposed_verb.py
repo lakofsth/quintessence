@@ -15,7 +15,7 @@ import unittest
 from quintessence import authgate, cli
 from quintessence import write as w
 from quintessence.config import Config
-from quintessence.findings import FindingsFile
+from quintessence.findings import RATIFY_CHANNEL, FindingsFile
 from quintessence.store import Store
 
 
@@ -52,10 +52,11 @@ class ReadyProposedVerb(unittest.TestCase):
                 with open(path, encoding="utf-8") as fh:
                     ff = FindingsFile.parse(fh.read())
                 out = cli.render_findings_next(store, store.config, ff)
-                if verb == "new":
-                    # the bare form writes a placeholder: named with its argv text, not as ready
-                    self.assertNotIn("\n  qq new sec-topic\n", out)
-                    self.assertIn("qq new sec-topic '<", out)
+                if "stdin" not in RATIFY_CHANNEL[verb]:
+                    # the bare form cannot carry an argv-only verb's text: named with its argv
+                    # text, not as ready
+                    self.assertNotIn(f"\n  qq {verb} sec-topic\n", out)
+                    self.assertIn(f"\n  run: qq {verb} sec-topic -- $'some text'\n", out)
                 else:
                     self.assertIn(f"\n  qq {verb} sec-topic\n", out)
 

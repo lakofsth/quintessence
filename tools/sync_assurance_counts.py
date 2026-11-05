@@ -89,9 +89,10 @@ def _is_checkout(engine: str) -> bool:
     return os.path.exists(os.path.join(engine, ".git"))
 
 
-def _git(engine: str, *argv: str) -> str:
+def _git(engine: str, *argv: str, env_extra: dict = None) -> str:
     # GIT_DIR / GIT_INDEX_FILE set by a hook would name some other repository's index.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(env_extra or {})
     try:
         proc = subprocess.run(["git", "-C", engine, *argv], capture_output=True, text=True,
                               env=env)
@@ -135,22 +136,50 @@ def unstaged_tests(engine: str) -> list:
     deleted): what is counted is the index's copy, not this one."""
     if not _is_checkout(engine):
         return []
-    return sorted({p for p in _paths(_git(engine, "diff", "--name-only", "-z", "--", "tests"))
+    # --no-renames: a renamed file's old path is a deletion, and a rename lists only the new one.
+    return sorted({p for p in _paths(_git(engine, "diff", "--no-renames", "--name-only", "-z",
+                                          "--", "tests"))
                    if _is_counted(p)})
+
+
+def _intent_to_add(engine: str) -> set:
+    """Paths under tests/ the index lists and a commit of it would not record: what `ls-files`
+    lists less what `write-tree` builds from the same index, which leaves out every
+    intent-to-add entry. Read from the index itself, so neither a rename `diff` pairs it with
+    nor a deleted working-tree copy hides one. `write-tree` runs on a copy of the index into a
+    scratch object directory, so the engine's index and objects are left as they were. The
+    index must hold no unmerged entry (`write-tree` refuses one)."""
+    def where(name):
+        return _git(engine, "rev-parse", "--path-format=absolute", "--git-path", name).strip()
+    scratch = tempfile.mkdtemp(prefix="sync-assurance-ita-")
+    try:
+        index = os.path.join(scratch, "index")
+        if os.path.exists(where("index")):
+            shutil.copyfile(where("index"), index)
+        os.mkdir(os.path.join(scratch, "objects"))
+        env = {"GIT_INDEX_FILE": index, "GIT_OBJECT_DIRECTORY": os.path.join(scratch, "objects"),
+               "GIT_ALTERNATE_OBJECT_DIRECTORIES": where("objects")}
+        tree = _git(engine, "write-tree", env_extra=env).strip()
+        recorded = set(_paths(_git(engine, "ls-tree", "-r", "-z", "--name-only", tree, "--",
+                                   "tests", env_extra=env)))
+        listed = set(_paths(_git(engine, "ls-files", "-z", "--", "tests", env_extra=env)))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return listed - recorded
 
 
 def refuse_unresolved_index(engine: str) -> None:
     """The index holds two entries `checkout-index` and `ls-files` read differently — an
     intent-to-add entry (`git add -N`: listed, but written out empty) and an unmerged one
     (stages 1 to 3: listed, but skipped) — so a count over either is a figure no commit holds.
-    Refuses, naming them, while the index has one under tests/. No-op outside a checkout."""
+    Refuses, naming them, while the index has one under tests/ — an intent-to-add entry
+    renamed or deleted in the working tree included. No-op outside a checkout."""
     if not _is_checkout(engine):
         return
     unmerged = {rec.split("\t", 1)[1] for rec in _git(engine, "ls-files", "-u", "-z", "--",
                                                        "tests").split("\0") if "\t" in rec}
-    intent = {p for p in _paths(_git(engine, "diff", "--name-only", "--diff-filter=A", "-z",
-                                     "--", "tests"))}
-    # `diff` lists an intent-to-add entry as added; a staged new file is not in `diff` at all.
+    # Unmerged entries are refused first; the intent-to-add read needs an index without them.
+    intent = set() if unmerged else _intent_to_add(engine)
     bad = sorted(p for p in unmerged | intent if _is_counted(p))
     if not bad:
         return
@@ -314,4 +343,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    from quintessence import pipeexit
+    pipeexit.run(main)

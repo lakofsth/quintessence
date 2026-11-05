@@ -71,8 +71,16 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+def _main_never_fails():
     try:
-        sys.exit(main())
+        return main()
+    except BrokenPipeError:
+        raise   # a reader that closed early: pipeexit.run makes it 141, as for every entry point
     except Exception:
-        sys.exit(0)   # never fail the caller; details (if reachable) are in resolver.log
+        return 0   # never fail the caller; details (if reachable) are in resolver.log
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from quintessence import pipeexit
+    pipeexit.run(_main_never_fails)

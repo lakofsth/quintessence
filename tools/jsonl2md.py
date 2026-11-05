@@ -13,6 +13,7 @@ wrapper). Never touches anything outside the given output path.
 Usage: jsonl2md.py <in.jsonl> <out.md>
 """
 import json
+import os
 import sys
 
 
@@ -81,9 +82,16 @@ def convert(in_path, out_path):
     }
 
 
-if __name__ == "__main__":
+def _cli():
     if len(sys.argv) != 3:
         print(__doc__)
-        sys.exit(1)
+        return 1
     stats = convert(sys.argv[1], sys.argv[2])
     print(json.dumps(stats))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    from quintessence import pipeexit
+    pipeexit.run(_cli)

@@ -79,11 +79,14 @@ if command -v systemd-run >/dev/null 2>&1; then
   printf '#!/usr/bin/env bash\nexit 0\n' > "$stub/systemd-run"; chmod +x "$stub/systemd-run"
   printf '#!/usr/bin/env bash\nif [ "$1" = is-active ]; then echo inactive; exit 3; fi; exit 0\n' > "$stub/systemctl"; chmod +x "$stub/systemctl"
   ( cd "$TMP" && PATH="$stub:$PATH" TSK_STATE="$weird" bash "$ENGINE/tsk" run tq1 true >/dev/null 2>&1 )
-  if [ -f "$weird/tq1.run" ]; then
-    bash -n "$weird/tq1.run" 2>/dev/null && ok "tsk-state-quoted: generated runner parses with a quote+dollar state dir" \
+  # .run is the record naming this start's runner (a-tsk-unit-executes-the-runner-its-own-start-wrote);
+  # the generated runner is the file it names
+  tq1runner=$(cat "$weird/tq1.run" 2>/dev/null)
+  if [ -f "$weird/tq1.run" ] && [ -f "$tq1runner" ]; then
+    bash -n "$tq1runner" 2>/dev/null && ok "tsk-state-quoted: generated runner parses with a quote+dollar state dir" \
       || no "tsk-state-quoted: generated runner does not parse"
     # run the generated runner itself (its command is `true`): the rc must land in the weird dir
-    rm -f "$weird/tq1.rc"; ( cd "$TMP" && bash "$weird/tq1.run" >/dev/null 2>&1 )
+    rm -f "$weird/tq1.rc"; ( cd "$TMP" && bash "$tq1runner" >/dev/null 2>&1 )
     [ "$(cat "$weird/tq1.rc" 2>/dev/null)" = "0" ] && ok "tsk-state-quoted: the runner writes its rc into the quote+dollar state dir" \
       || no "tsk-state-quoted: the runner did not write rc=0 into the state dir"
   else

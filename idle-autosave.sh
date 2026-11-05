@@ -33,25 +33,51 @@
 # Silent and fail-open on every error path except the one deliberate exit 2.
 set -u
 ENGINE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# Whether the ENVIRONMENT (not the config file) set the disable key, read before the file fills it:
+# an env value is fixed for this process, a file value can change while the waiter below is armed.
+DISABLE_FROM_ENV="${QQ_IDLE_AUTOSAVE_DISABLE+x}"
 . "$ENGINE/qq-config.sh"
-
-[ "${QQ_IDLE_AUTOSAVE_DISABLE:-0}" = "1" ] && exit 0
 
 STATE="${QQ_IDLE_AUTOSAVE_STATE:-${QQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/quintessence}/idle-autosave}"
 DELAY="${QQ_IDLE_AUTOSAVE_DELAY:-3000}"
 POLL="${QQ_IDLE_AUTOSAVE_POLL:-60}"
-mkdir -p "$STATE" 2>/dev/null || exit 0
-# tidy stale per-session state (dead sessions). A live session rewrites its armstamp-/timer- every
-# turn, so only genuinely-dead sessions age past +2 days.
-find "$STATE" -maxdepth 1 -type f \( -name 'act-*' -o -name 'armstamp-*' -o -name 'timer-*' \) -mtime +2 -delete 2>/dev/null
 
 inp=$(cat 2>/dev/null)
 sid=$(printf '%s' "$inp"   | jq -r '.session_id // empty'      2>/dev/null)
 tpath=$(printf '%s' "$inp" | jq -r '.transcript_path // empty' 2>/dev/null)
 [ -n "$sid" ] || exit 0
-[ -n "$tpath" ] && [ -f "$tpath" ] || exit 0
 
 pidf="$STATE/timer-$sid.pid"
+
+# is the autosave switched off NOW? env > config file, as at start: an env value cannot change under
+# us, so only a file-sourced value is re-read — through the same parser, in a subshell, with the key
+# unset so the file's current line (or its absence) decides.
+disabled_now(){
+  [ -n "$DISABLE_FROM_ENV" ] && { [ "${QQ_IDLE_AUTOSAVE_DISABLE:-0}" = "1" ]; return; }
+  [ "$(unset QQ_IDLE_AUTOSAVE_DISABLE; _qq_load_config; printf '%s' "${QQ_IDLE_AUTOSAVE_DISABLE:-0}")" = "1" ]
+}
+
+# --- SUPERSEDE: kill this session's previous idle-timer (by stored PID; verify cmdline; never pkill -f) ---
+# Runs BEFORE the disable exit: a user who switches the autosave off mid-session (config file, which
+# every Stop re-reads) must also stand down the waiter the PREVIOUS Stop armed, or that waiter still
+# wakes the session once, up to DELAY later. Read-only on state — a disabled hook creates nothing.
+if [ -f "$pidf" ]; then
+  oldpid=$(cat "$pidf" 2>/dev/null || true)
+  if [ -n "${oldpid:-}" ] && [ "$oldpid" != "$$" ] && kill -0 "$oldpid" 2>/dev/null \
+     && grep -qa 'idle-autosave' "/proc/$oldpid/cmdline" 2>/dev/null; then
+    kill "$oldpid" 2>/dev/null || true
+  fi
+fi
+
+disabled_now && exit 0
+
+mkdir -p "$STATE" 2>/dev/null || exit 0
+# tidy stale per-session state (dead sessions). A live session rewrites its armstamp-/timer- every
+# turn, so only genuinely-dead sessions age past +2 days.
+find "$STATE" -maxdepth 1 -type f \( -name 'act-*' -o -name 'armstamp-*' -o -name 'timer-*' \) -mtime +2 -delete 2>/dev/null
+
+[ -n "$tpath" ] && [ -f "$tpath" ] || exit 0
+
 actf="$STATE/act-$sid"          # genuine-activity count as of the last fire/checkpoint
 stampf="$STATE/armstamp-$sid"   # epoch of last arm (to detect checkpoints since)
 
@@ -86,28 +112,22 @@ own_checkpoint_since(){
       elif ((.name // "")|test("quintessence")) then "M\t" + (.name) + " " + ((.input // {})|tostring)
       else empty end
   ' "$tpath" 2>/dev/null)
-  # The command arrives as one JSON string per line. quote-mask.py masks quoted spans and comments
-  # of the WHOLE command as bash lexes it, THEN folds newlines to ";" — folding first would turn a
-  # `# don't …` comment line into a comment swallowing the next line's real `qq update`. The mask is
-  # length-preserving and bash-aware (an apostrophe inside "…" is a letter), so a qq-write inside a
-  # printf/heredoc/grep-pattern argument is removed while a real unquoted `echo x | qq update`
-  # survives. Anything the mask cannot run (no python3) yields no match: no rebaseline, which errs
-  # toward waking once more rather than toward suppressing a wake.
+  # The command arrives as one JSON string per line. quote-mask.py masks quoted spans, heredoc
+  # bodies and comments of the WHOLE command as bash lexes it, THEN folds newlines to ";" — folding
+  # first would turn a `# don't …` comment line into a comment swallowing the next line's real
+  # `qq update`. The mask is length-preserving and bash-aware (an apostrophe inside "…" is a letter;
+  # a heredoc body is read to its terminator, so a mention inside one is data and a quote inside one
+  # cannot mask code after it), so a qq-write inside a printf argument, a heredoc body or a
+  # grep-pattern argument is removed while a real unquoted `echo x | qq update` survives. Anything
+  # the mask cannot read — it cannot run (no python3), or it refuses a command whose scan is not its
+  # input's length — yields no match: no rebaseline, which errs toward waking once more rather than
+  # toward suppressing a wake.
   printf '%s\n' "$out" | sed -n 's/^B\t//p' \
     | python3 "$ENGINE/quote-mask.py" 2>/dev/null \
     | grep -qE "(^|[|;&])[[:space:]]*(sudo[[:space:]]+)?qq[[:space:]]+$WV([[:space:]]|$)" && { echo yes; return; }
   printf '%s\n' "$out" | sed -n 's/^M\t//p' \
     | grep -qE "update_head|__qq[[:space:]].*$WV" && echo yes
 }
-
-# --- SUPERSEDE: kill this session's previous idle-timer (by stored PID; verify cmdline; never pkill -f) ---
-if [ -f "$pidf" ]; then
-  oldpid=$(cat "$pidf" 2>/dev/null || true)
-  if [ -n "${oldpid:-}" ] && [ "$oldpid" != "$$" ] && kill -0 "$oldpid" 2>/dev/null \
-     && grep -qa 'idle-autosave' "/proc/$oldpid/cmdline" 2>/dev/null; then
-    kill "$oldpid" 2>/dev/null || true
-  fi
-fi
 
 # --- REBASELINE: if THIS SESSION saved its own work since last arm (its own fire, /wrap, or a manual
 #     qq finalize — detected in this session's transcript), absorb the current activity count so we
@@ -130,6 +150,9 @@ last=$(mtime); qstart=$(date +%s)
 while :; do
   sleep "$POLL"
   [ "$(cat "$pidf" 2>/dev/null || echo)" = "$$" ] || exit 0          # superseded by a newer arm → stand down
+  # switched off while armed (config file edited, no later Stop to supersede us) → stand down. Every
+  # iteration, so the break below — the only way to the fire — is always preceded by this check.
+  disabled_now && exit 0
   m=$(mtime); nowp=$(date +%s)
   if [ "$m" != "$last" ]; then last=$m; qstart=$nowp; continue; fi   # transcript moved → still active, reset
   [ $(( nowp - qstart )) -ge "$DELAY" ] && break                     # settled + quiet to the cache edge
