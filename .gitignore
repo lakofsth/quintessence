@@ -4,3 +4,7 @@
 *.log
 __pycache__/
 *.pyc
+# Caches and environments a tool writes into a working checkout. Each also writes its own
+# `.gitignore` of `*`, which tests/py/_treefiles.walk_files honours; these lines say it here too.
+.pytest_cache/
+.venv/

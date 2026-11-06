@@ -16,6 +16,7 @@ test_dispatcher.py's menu test was green on 3.13 and red on 3.14 at 883712f).
 import ast
 import fcntl
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -66,7 +67,12 @@ def block_problem(source, name="<src>"):
 
 
 def entry_points():
-    """{relative path: source} for every tracked file outside tests/ with a __main__ block."""
+    """{relative path: source} for every tracked file outside tests/ with a __main__ block.
+
+    Every such file is tried as Python, whatever its name or shebang: the MCP servers' first line
+    is `#!/usr/bin/env -S uv run --script`, which names no python, so a shebang guess missed them.
+    A file that does not parse is not Python and is skipped, except a `.py` file, which must parse:
+    skipping that would let a broken entry point drop out of the pin silently."""
     out = {}
     for rel in _treefiles.engine_files(ENGINE):
         if rel.startswith("tests/"):
@@ -76,10 +82,14 @@ def entry_points():
             continue
         with open(path, "rb") as f:
             raw = f.read()
-        if not (rel.endswith(".py") or raw.startswith(b"#!") and b"python" in raw.split(b"\n", 1)[0]):
-            continue
         src = raw.decode("utf-8", errors="replace")
-        if _main_block(ast.parse(src, rel)) is not None:
+        try:
+            tree = ast.parse(src, rel)
+        except (SyntaxError, ValueError):
+            if rel.endswith(".py"):
+                raise
+            continue
+        if _main_block(tree) is not None:
             out[rel] = src
     return out
 
@@ -92,6 +102,29 @@ class TestEveryEntryPointEndsThroughPipeexit(unittest.TestCase):
             self.assertIn(known, found)
         bad = {rel: p for rel, src in found.items() if (p := block_problem(src, rel))}
         self.assertEqual(bad, {})
+
+    def test_the_derivation_does_not_depend_on_the_shebang(self):
+        # The MCP servers run under `#!/usr/bin/env -S uv run --script`, whose first line names no
+        # python: a shebang guess left them outside the pin (fix-review 20261105T123503Z, N1).
+        # The servers are named by suffix, not listed: a tree may hold more or fewer of them.
+        found = entry_points()
+        servers = [rel for rel in _treefiles.engine_files(ENGINE)
+                   if rel.endswith("-mcp") and not rel.startswith("tests/")]
+        for known in ("qq-remote-mcp", "qq-search-mcp"):   # positive control on the suffix walk
+            self.assertIn(known, servers)
+        for rel in servers:
+            self.assertIn(rel, sorted(found))
+
+    def test_the_register_states_the_derived_count(self):
+        # The register's site-derivation line said 17 while the pin derived 14: hold the number
+        # it states to the number derived, so an entry point added or lost moves both or neither.
+        with open(os.path.join(ENGINE, "tests", "INVARIANTS.md"), encoding="utf-8") as f:
+            text = f.read()
+        head = "## `a-reader-that-closes-early-ends-every-entry-point-with-141-and-no-message`"
+        section = text.split(head, 1)[1].split("\n## ", 1)[0]
+        stated = re.findall(r"that is (\d+) files", section)
+        self.assertEqual(len(stated), 1, "the site-derivation line states no single count")
+        self.assertEqual(int(stated[0]), len(entry_points()))
 
     def test_the_block_check_can_fail(self):
         # Negative controls: each shape the check must refuse is refused.

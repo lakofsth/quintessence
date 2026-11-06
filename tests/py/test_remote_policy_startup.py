@@ -231,7 +231,10 @@ class CrownJewelsAlwaysFailClosedTest(unittest.TestCase):
             p.preflight()
         msg = str(cm.exception)
         self.assertIn("cannot be read", msg)
-        self.assertNotIn("not found", msg)
+        # The message names fixture paths under TMPDIR; the word is read with them taken out, so the
+        # scratch directory's name cannot decide it (tests/INVARIANTS.md
+        # a-test-oracle-over-paths-does-not-read-the-scratch-directory-name).
+        self.assertNotIn("not found", msg.replace(self.tmp.name, "<tmp>"))
 
     def test_withheld_invalid_utf8_is_fatal(self):
         """A withheld-topics file containing non-UTF-8 bytes is unreadable — fatal at startup

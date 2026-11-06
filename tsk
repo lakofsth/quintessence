@@ -42,7 +42,7 @@ stash_back(){   # $1 = job name — put a stashed previous result back where rea
   # signal traps (final-round finding: a signal landing between stash and restore used to
   # strand the previous result where only `clean` could reach it — as deletion, not
   # restore). After a successful start the stash is already discarded: no-op.
-  # CHECKED, both mvs, the mirror of the checked forward stash in `run` (ledger D274): an
+  # CHECKED, both mvs, the mirror of the checked forward stash in `run`: an
   # unchecked restore left the previous result in :prev, where status/rc/wait do not look,
   # and said nothing. Reported on stderr and returned, never `die`d: install_failed calls
   # this before its own die, and its message is the one that says why the start failed.
@@ -105,10 +105,10 @@ case "${1:-}" in
     trap 'rm -f "$tmp" ${runner:+"$runner"} ${cmdtmp:+"$cmdtmp"}; stash_back "$name"' EXIT
     trap 'rm -f "$tmp" ${runner:+"$runner"} ${cmdtmp:+"$cmdtmp"}; stash_back "$name"; exit 1' INT TERM
     # Pre-flight: the previous run's RESULT is STASHED, not deleted — restored on any failed
-    # or interrupted start, discarded once systemd-run succeeds. (Closes the D117 root note:
-    # a failed start used to destroy a completed job's rc/done.) `.log` is deliberately NOT
-    # touched here or in the failure paths — that asymmetry is a RULING [Thomas, 2026-08-09,
-    # ledger D117]: a failed start is exactly when the previous run's output is worth
+    # or interrupted start, discarded once systemd-run succeeds. (This closes an
+    # earlier gap: a failed start used to destroy a completed job's rc/done.) `.log` is deliberately NOT
+    # touched here or in the failure paths — that asymmetry is a deliberate
+    # ruling: a failed start is exactly when the previous run's output is worth
     # having. With the restore, log and result stay a CONSISTENT pair after a failed start —
     # both describe the previous run, and the help line for `log` says so. H6 pins it.
     # COMPLEMENTARY halves across the two namespaces are an INTERRUPTED stash or restore
@@ -130,7 +130,7 @@ case "${1:-}" in
     fi
     if [ -f "$STATE/$name.rc" ] || [ -f "$STATE/$name.done" ]; then
       rm -f "$STATE/$name":prev.{rc,done}   # a live result supersedes any stranded stash
-      # CHECKED stash, same D116 discipline as the runner writes below: an unchecked mv
+      # CHECKED stash, same discipline as the runner writes below: an unchecked mv
       # here left the OLD rc/done in place while `run` reported started, so wait/rc/status
       # answered with the previous run's result for the new job (final-round finding).
       if [ -f "$STATE/$name.rc" ]; then
@@ -150,7 +150,7 @@ case "${1:-}" in
     # manager mis-reporting a live unit as inactive) therefore touches no file the live unit
     # reads or the live job's records hold: it used to rename its runner onto the shared .run
     # the live unit executes, inside the winner's fork-to-first-open gap, and the refused
-    # caller's command ran under the winner's name (ledger D122, D271; 1/200 under the stub).
+    # caller's command ran under the winner's name (1/200 under the stub).
     cmdtmp="$STATE/$name:cmd.tmp.$$"
     printf '%s\n' "$*" > "$cmdtmp" || install_failed "$name" "could not write the command record (nothing was started)"
     runner="$STATE/$name:runner.$$.${EPOCHREALTIME/./}"
@@ -162,7 +162,7 @@ case "${1:-}" in
     # CHECKED write. tsk sets no `-e`, so an unchecked cat discarded its status: a short
     # write (ENOSPC, quota) left a TRUNCATED script that chmod and the checked rename below
     # then installed without complaint, systemd-run executed it, and `run` reported success
-    # for a job that never ran its command and never wrote rc/done (ledger D116). Installing
+    # for a job that never ran its command and never wrote rc/done. Installing
     # a runner is two steps; hardening only the rename left the write beside it open.
     cat > "$tmp" <<EOF || install_failed "$name" "could not write runner script (nothing was started)"
 #!/usr/bin/env bash
@@ -230,7 +230,7 @@ EOF
     done
     rc=$(cat "$STATE/$n.rc" 2>/dev/null)
     # Degrade anything outside a real exit status to 1. The envelope is 0-255, checked in two
-    # parts on purpose (ledger D97): the digit bound comes FIRST so `[` is never handed a
+    # parts on purpose: the digit bound comes FIRST so `[` is never handed a
     # 20-digit number, which makes it print "integer expression expected" to the user's stderr
     # instead of failing quietly. Leading zeros are decimal to `exit` (007 is 7, not octal 8),
     # so three digits is the right bound. Two wrong behaviours this closes, both measured on

@@ -30,7 +30,11 @@ first one.
 
 ## Capture as you work (saving is unconditional – it builds the journal)
 - Add a note (the common as-you-go write): `qq update <topic> "<text>"` – merge-safe, inserts under
-  the lock, can't clobber. Use it freely as you work, not only at exit.
+  the lock, can't clobber. Use it freely as you work, not only at exit. Don't type a model or
+  session marker into the text: under an agent harness `qq` stamps it after the timestamp.
+- If you are woken with an `Idle-checkpoint (auto):` message, the idle-autosave hook saw a quiet
+  session with unsaved activity: capture what is new (`qq update` / `qq finalize`), or do nothing
+  if nothing is, and end the turn without resuming other work.
 - Start a thread: `qq new <topic> "<essence>"`. Reset the essence, which is the line the menu
   shows, with `qq essence <topic> "<text>"` the moment an update outdates it.
 - Rewrite a whole HEAD (rare; refuses if another session changed the HEAD): `qq rewrite <topic> < full_content`.
@@ -60,7 +64,8 @@ one, a project store (`<project>/.quintessence/`, discovered by walking up from 
 transparent – the verbs above just work:
 - Reads compose most-specific-first (`qq show`/`brief`/`path` resolve project→user; `qq list`
   unions; `--global` restricts to the user store). Writes (`new`/`update`/`finalize`) go to the
-  project store when you're in one.
+  project store when you're in one. Only a `.quintessence/` made by `qq init --project` counts;
+  one that came in with a cloned repository is ignored.
 - Atomic **facts** follow the same layering: write a project's facts under the dir `qq memdir`
   prints (`<project>/.quintessence/memory`); `qq memdir --global` is the user store's. Create a
   project store with `qq init --project`.

@@ -62,7 +62,12 @@ and you need a store. Run `bash setup.sh` from the repo – or just ask your age
 `qq` into `~/.local/bin`, runs `qq init`, writes a durable config file
 (`~/.config/quintessence/config`, managed with `qq config`), runs `qq doctor` and the test
 suite (`tests/run.sh`), and prints the `PATH` line only if `~/.local/bin` isn't already on it. It never edits your shell profile.
-Override `BIN_DIR` / `QUINTESSENCE_DIR` / `QQ_MEMDIR` for non-defaults. The plugin does not set
+Override `BIN_DIR` / `QUINTESSENCE_DIR` / `QQ_MEMDIR` / `SKILLS_DIR` (default `~/.claude/skills`) /
+`CLAUDE_SETTINGS` (default `~/.claude/settings.json`) for non-defaults; a leading `~` or `~/` in
+any of them is expanded against `$HOME` even when quoted, and `~user` is refused. `QQ_CONFIG` /
+`XDG_CONFIG_HOME` choose which config file it writes. A store or memory directory already set in
+that config file (`qq config set QUINTESSENCE_DIR …`) is what a re-run initialises and wires;
+the environment still wins over the file. The plugin does not set
 the `Edit/Write` deny rule (Option B); the `qq init` git hooks hold the write-path either way.
 
 > ⚠ Don't enable the plugin on a machine that already wires these hooks manually (Option B) – the
@@ -135,6 +140,9 @@ quiet in all 24 measured records (2026-10-23), and its transcript write resets t
 clock, so a 3300 s delay lost that race 22 of 24 times. The hook entry's `timeout` (3600) must
 stay above the delay. Knobs, all registered in [CONFIG.md](CONFIG.md): `QQ_IDLE_AUTOSAVE_DELAY`,
 `QQ_IDLE_AUTOSAVE_POLL`, `QQ_IDLE_AUTOSAVE_STATE`, and `QQ_IDLE_AUTOSAVE_DISABLE=1` to turn it off.
+Set in the config file (`qq config set QQ_IDLE_AUTOSAVE_DISABLE 1`), the switch takes effect
+mid-session: an armed timer re-reads it on every poll and stands down, so it does not wake the
+session one last time.
 It needs `jq` and `python3` (the latter only to tell a real `qq update` from one quoted in an
 argument).
 

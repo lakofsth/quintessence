@@ -32,8 +32,8 @@ CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"
 # A QUOTED `~` is not expanded by the shell that exported it, so every path override above
 # arrives here as a literal tilde and, taken verbatim, builds ./~/... under the working
-# directory while reporting success (ledger D92: the hooks were wired into ./~/.claude and the
-# real settings left untouched). EXPANDED rather than refused: `~` and `~/` have exactly one
+# directory while reporting success (the hooks were wired into ./~/.claude and the real settings left
+# untouched). EXPANDED rather than refused: `~` and `~/` have exactly one
 # meaning, the one the shell would have given them unquoted, and the defaults are $HOME-based
 # anyway. `~user` is REFUSED: it names someone else's home, and resolving that is not ours.
 _untilde() {   # NAME — rewrite a leading ~ or ~/ in $NAME against $HOME, in place

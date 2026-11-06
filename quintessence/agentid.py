@@ -4,7 +4,7 @@
 
 An update-line has always carried a marker naming the model that wrote it (`[Opus 5, ...]`), and
 it has always been prose: the writing session types it, nothing derives it, nothing checks it.
-That is the shape this estate has ledgered twice already (D43, D90) — a hand-written value drifts,
+That is a shape this project has recorded more than once — a hand-written value drifts,
 and the field a model is least reliable about is its own identifier. So the marker a reader sees
 is derived here instead, from the harness environment and the session's own transcript, which
 makes it a record rather than a claim.
@@ -24,7 +24,7 @@ deliberate and narrow, and it is the only harness this knows. Off it (a human at
 cron, another agent runner) nothing is emitted. That is the correct answer, not a degraded one:
 a write with no agent behind it should carry no agent's name.
 
-The estate's `agent-stamp(1)` derives the same identity in bash for git's `prepare-commit-msg`
+A separate bash tool can derive the same identity for git's `prepare-commit-msg`
 hook. The two are independent implementations of one convention — this one marks the update-line
 a reader sees, that one marks the commit that carries it — so a change to the convention needs
 both. Neither can be derived from the other: the hook must run with no python import path, and

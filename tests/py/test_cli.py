@@ -561,7 +561,7 @@ class TestFact(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as base:
             store = make_store(base)
-            body = "---\nname: user-name\n---\nThomas Lakofski.\n"
+            body = "---\nname: user-name\n---\nAlex Example.\n"
             with open(os.path.join(store.memdir, "user_name.md"), "w") as f:
                 f.write(body)
             self.assertEqual(cli.render_fact(store, "user_name"), body)

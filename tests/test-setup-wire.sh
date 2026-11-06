@@ -341,7 +341,7 @@ _old="$(( $(date +%s) - 3 * 86400 ))"
 # cannot cover: the reclaim claims only tails carrying one of `abcdef`, deliberately narrower
 # than the writer, so about one captured tail in 281 is all-decimal and is NOT reclaimed. That is
 # ruled behaviour, and the "is reclaimed" assertion below was contradicting it about one run in
-# 281 (D77). Pinned narrowly — only the CAPTURE run, whose whole job is to produce a name; the
+# 281. Pinned narrowly — only the CAPTURE run, whose whole job is to produce a name; the
 # measuring run below keeps the real thing. The note further up about not pinning `os.urandom` is
 # about the O_EXCL property, which needs it held for a whole run and is pinned in the engine
 # instead. The forced bytes carry a counter, so uniqueness — the property O_EXCL rests on — is
@@ -410,7 +410,7 @@ elif ! printf '%s' "$_gen_tail" | grep -q '[a-f]'; then
   # The capture run's urandom is pinned to a letter-bearing token precisely so this cannot happen
   # by chance. If it happens anyway the pinning has stopped reaching the writer, and the honest
   # answer is to say so once, loudly — not to plant a fixture the reclaim is RULED not to claim
-  # and read the resulting delete-failure as a mirror defect (D77).
+  # and read the resulting delete-failure as a mirror defect.
   no "the captured tail '$_gen_tail' carries no hex letter, so the reclaim is ruled not to claim it — the capture run's forced os.urandom is no longer reaching the writer, and the assertions below would be testing the documented cost instead of the mirror"
 else
   for _n in settings.json.tmp "$_gen_name" settings.json.tmp.20260801 settings.json.tmp.202608041200; do
@@ -676,7 +676,7 @@ _cycle_dir="$(ls -a "$TMP/cycle/.claude" | grep -vc '^\.\.\?$')"
 
 overrides="$(_documented_overrides)"
 # The enumeration must find work. An empty derivation would make both pins below pass while
-# asserting nothing — the same vacuity D59 is about, one file over, so it is refused here rather
+# asserting nothing — the same vacuity as an empty match set elsewhere, so it is refused here rather
 # than discovered later. QQ_CONFIG is named explicitly because it is the channel the CRITICAL rode
 # on: a derivation that stopped finding it would leave that exact hole certified.
 if [ -z "$overrides" ]; then
@@ -812,7 +812,7 @@ else
 fi
 
 # --- a literal `~` in a path override means $HOME, never ./~ under the working directory -------
-# Ledger D92. `CLAUDE_SETTINGS='~/.claude/settings.json'` — quoted, so the shell never expanded it —
+# `CLAUDE_SETTINGS='~/.claude/settings.json'` — quoted, so the shell never expanded it —
 # used to wire ./~/.claude/settings.json under whatever directory the installer was run from, say
 # "Done.", and leave the real settings unwired. The same shape held for every path override in the
 # `# Env overrides:` header, so the case sets ALL of them, derived from that line rather than

@@ -14,7 +14,7 @@
 # lands there — measured 1/200 on the first full post-fix run (tests/stress/README.md).
 # The unique runner path (tsk: each start writes its runner to a path of its own, and the shared
 # .run/.cmd records only after its unit exists) closes that window, so a substitution is now a
-# FAILURE with a ceiling of zero (ledger D272: it used to be counted and left out of the exit
+# FAILURE with a ceiling of zero (it used to be counted and left out of the exit
 # status, so 1/200 and 200/200 exited alike). It is still counted apart on the RESULT line,
 # because it is the signature of the window reopening.
 #

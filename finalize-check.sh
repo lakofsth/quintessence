@@ -13,7 +13,7 @@ qd="${QUINTESSENCE_DIR:-$HOME/quintessence}"
 [ -d "$qd" ] || exit 0
 # -H: dereference the starting point. `[ -d "$qd" ]` above follows a symlink, so a symlinked
 # store passes the guard and then find's default -P silently refuses to descend it, tidying
-# nothing forever. Same defect as tsk's orphan sweep (ledger D114).
+# nothing forever. Same defect as tsk's orphan sweep.
 find -H "$qd" -maxdepth 1 -name '.rewake-*'  -mtime +1 -delete 2>/dev/null   # tidy old sentinels
 find -H "$qd" -maxdepth 1 -name '.checked-*' -mtime +1 -delete 2>/dev/null
 sid=$(jq -r '.session_id // "nosession"' 2>/dev/null) || sid="nosession"

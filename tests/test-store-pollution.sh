@@ -10,7 +10,7 @@
 #
 # This test reproduces exactly that invocation shape (QUINTESSENCE_DIR pre-exported before the
 # suite runs, matching setup.sh's real environment) against a DECOY scratch store that is never
-# Thomas's real store, and asserts the decoy stays completely empty. It targets the two suites the
+# the operator's real store, and asserts the decoy stays completely empty. It targets the two suites the
 # finding named (test-multi-store.sh, test-recall-composition.sh) directly, independent of
 # setup.sh's own `env -u QUINTESSENCE_DIR` guard — so a regression in either suite's own defensive
 # `unset` is caught even if setup.sh's invocation-side fix stays intact.

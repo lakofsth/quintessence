@@ -406,7 +406,7 @@ KEYS: list[KeyDef] = [
            "install binds no git refs until you name your own repos."),
     KeyDef("QQ_BIND_HOSTS", "csv", [], "binding",
            "Remote-host map for host:path binding: comma-separated host=ssh-destination "
-           "entries (e.g. nas=user@nas). Prose like 'nas:/tank/ca-state' binds as an `rfile` "
+           "entries (e.g. nas=user@nas). Prose like 'nas:/tank/app-state' binds as an `rfile` "
            "ref when the host prefix matches a configured entry. Fingerprinting one referent "
            "takes one ssh invocation (BatchMode=yes, ConnectTimeout=5): a content sha256 for "
            "files up to the 64MiB hash cap, size and mtime above it, a listing hash for "
@@ -490,10 +490,10 @@ KEYS: list[KeyDef] = [
            "session is not trusted. Mostly a seam for tests and integration."),
 
     # ---- contract version -----------------------------------------------------------------
-    KeyDef("QQ_CONTRACT_VERSION", "int", 3, "internal-constant",
+    KeyDef("QQ_CONTRACT_VERSION", "int", 4, "internal-constant",
            "The version marker ('qq-contract vN') the installed CONTRACT.md must carry. Not "
            "overridable from the environment on the bash side, where qq-lib.sh assigns "
-           "`QQ_CONTRACT_VERSION=3` outright rather than `${VAR:-3}`. Registered here so a "
+           "`QQ_CONTRACT_VERSION=4` outright rather than `${VAR:-4}`. Registered here so a "
            "check of CONTRACT.md has one source of truth to compare against."),
 
     # ---- Tier-1 deterministic check toggles/budgets ---------------------------------------
@@ -756,7 +756,7 @@ class Config:
             return _expanduser(self, raw)
         if type_ == "int":
             # Accept exactly the grammar, not int()'s: int() also reads `1_000`, `+7`, ` 5` and
-            # non-ASCII decimal digits (D890/D893 – the same grammar `url=<whole number>` uses).
+            # non-ASCII decimal digits (the same grammar `url=<whole number>` uses).
             pattern = _SIGNED_INT_RE if name in _SIGNED_INT_KEYS else _WHOLE_NUMBER_RE
             if not pattern.fullmatch(raw):
                 raise ConfigError(f"{name or 'config value'}: {raw!r} is not a number "

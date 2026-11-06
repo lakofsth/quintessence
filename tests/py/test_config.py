@@ -286,7 +286,7 @@ class TestWithOverrides(unittest.TestCase):
 
 
 class TestTypedIntegerGrammar(unittest.TestCase):
-    """A typed integer read from configuration is ASCII decimal digits and nothing else (D893)."""
+    """A typed integer read from configuration is ASCII decimal digits and nothing else."""
     def cfg(self, **env):
         return Config(env=dict(env, HOME="/synthetic"), config_file="/nonexistent")
 

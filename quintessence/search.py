@@ -903,8 +903,8 @@ class SearchIndex:
         return False
 
     def _filter_redacted(self, hits: list) -> list:
-        """PROVISIONAL — the semantics here are an OPEN DESIGN QUESTION, see the qq-packaging
-        HEAD's 2026-07-29 'redaction scope' entry; this is the reversible middle, not a ruling.
+        """PROVISIONAL — the semantics here are an OPEN DESIGN QUESTION (the 2026-07-29
+        'redaction scope' entry in the design record); this is the reversible middle, not a ruling.
         Filtering is LIFTABLE per-call (QQ_SEARCH_UNREDACTED), because the redact list is
         model-dependent by design and the auto-recall hook establishes the reader's model
         itself before calling search — without the lift, filtering here would silently override

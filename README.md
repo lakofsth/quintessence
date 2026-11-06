@@ -169,6 +169,12 @@ naming a HEAD that exists only in the user store refuses with a hint rather than
 forking it. Semantic recall composes the same way: with a project store present, `qq
 search`/`qq ask` merge both indexes by score and tag each hit `(qq/project)` vs `(qq/user)`.
 
+Discovery accepts only a store this install made: a `.quintessence/` must carry the scaffold
+`qq init --project` writes (its own git repository with the write-lock hook). One that arrived
+inside a cloned or unpacked repository is ignored rather than becoming the write target and a
+recall source. Set `QQ_PROJECT_STORES` to a comma-separated list of project roots to narrow
+discovery further to those roots (see CONFIG.md and SECURITY.md).
+
 Limits: the staleness-xref and the auto-recall hooks still run over the user corpus only;
 a project's `memory/` isn't part of recall yet (its HEADs are); and the MCP search server
 resolves its store path at startup, so a project store created mid-session needs a server

@@ -7,7 +7,7 @@
 # Copyright (C) 2026 Thomas Lakofski
 """qq-remote-mcp — the HOSTED remote face of the continuity store (streamable-HTTP MCP).
 
-Design source: the `qq-remote-connector` HEAD (decisions D1-D10). Sibling of `qq-search-mcp`,
+Design decisions D1-D10 are numbered as in the design record. Sibling of `qq-search-mcp`,
 which stays exactly as it is: stdio, local, full tool set, for Claude Code on this box. THIS
 server is the one that hosted surfaces (claude.ai web / Cowork / desktop / mobile, D7) reach
 through an SSH reverse tunnel to a jump host and a reverse-proxy vhost firewalled to Anthropic's egress

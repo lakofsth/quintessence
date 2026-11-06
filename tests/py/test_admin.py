@@ -98,7 +98,10 @@ class TestDoctorGitIdentity(unittest.TestCase):
             with scratch_git_identity_env(scratch_home, configured=True):
                 rc, text = admin.doctor(config, REPO_ROOT)
         self.assertEqual(rc, 0, text)
-        self.assertNotIn("git author identity not configured", text)
+        # The output names fixture paths under TMPDIR; the word is read with them taken out, so the
+        # scratch directory's name cannot decide it (tests/INVARIANTS.md
+        # a-test-oracle-over-paths-does-not-read-the-scratch-directory-name).
+        self.assertNotIn("git author identity not configured", text.replace(base, "<base>"))
 
     def test_identityless_store_warns_even_when_cwd_repo_has_an_identity(self):
         """This verification pass (2026-07-29): doctor used to run a BARE `git config` with no

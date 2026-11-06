@@ -197,8 +197,8 @@ out_opus="$(run_resume "$OPUS_TP" "it-opus")"
 # `ask` always did, but the filtering is LIFTABLE per-call (QQ_SEARCH_UNREDACTED), and this hook
 # sets that lift because it judges redaction itself, per hit, from the session's model (line ~64).
 # So the model-aware behaviour below is unchanged: a gated reader is protected, an ungated one
-# keeps full recall. The scope of the redact list is an OPEN design question — see the
-# qq-packaging HEAD's 2026-07-29 'redaction scope' entry; if it is ruled the other way, THIS
+# keeps full recall. The scope of the redact list is an OPEN design question (the
+# 2026-07-29 'redaction scope' entry in the design record); if it is ruled the other way, THIS
 # assertion is the one that flips, deliberately and visibly.
 printf '%s' "$out_opus" | grep -q 'ssh-exposure' \
   && ok "resume-match.sh integration: confirmed-opus model surfaces the redact-listed slug too (full recall)" \

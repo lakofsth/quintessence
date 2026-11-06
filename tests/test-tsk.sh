@@ -13,7 +13,7 @@
 # does not fire there and the manager-bound assertions DO execute: measured `tsk: 0 failed,
 # 25 passed` in CI run 31167177882, `44 passed` in 31186975559 and `45 passed` in 31276284827 —
 # the full counts, not the hermetic-only subset. Three consecutive review rounds reasoned from
-# their own manager-less sandbox to a conclusion about CI without reading a CI log (ledger D115).
+# their own manager-less sandbox to a conclusion about CI without reading a CI log.
 # The skip path is for containers and sandboxes that lack a manager, not for our pipeline.
 set -u
 ENGINE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -40,9 +40,8 @@ no(){ fail=$((fail+1)); printf 'FAIL %s\n' "$1"; }
 # handling and were measured passing with systemctl absent entirely, so hiding them behind
 # the SKIP left them unrun on any manager-less host (follow-up round F3). Deliberately no
 # count here — the SKIP message below prints the live one, and a hand-written total in a
-# comment is the drift this project keeps ledgering (D43, D90). What the round got wrong was
-# the reach, not the fix: it cited CI as a manager-less host and CI is not one (see the header
-# and ledger D115). The relocation is still right — it covers developer sandboxes, containers,
+# comment is the drift this project keeps recording. What the round got wrong was
+# the reach, not the fix: it cited CI as a manager-less host and CI is not one (see the header). The relocation is still right — it covers developer sandboxes, containers,
 # and any future runner without a manager — it just was not protecting the pipeline.
 mkdir -p "$TSK_STATE"   # these run before any tsk call, so the state dir does not exist yet;
                         # without it H1's setup writes fail silently and the assertion would
@@ -51,8 +50,8 @@ mkdir -p "$TSK_STATE"   # these run before any tsk call, so the state dir does n
 #     die path instead of crashing on exit (round-2/3 review F-C; needs external tampering
 #     to arise, but the crash shape is a new-guard boundary worth pinning)
 #     Enumerated across the ENVELOPE, not one example, because the interesting failures are all
-#     at the edges and each earlier narrowing of this guard stopped one step short (ledger D96,
-#     D97: `-f`->`-s`, then `-n`->`^[0-9]+$`, and an all-digit out-of-range value still reached
+#     at the edges and each earlier narrowing of this guard stopped one step short
+#     (`-f`->`-s`, then `-n`->`^[0-9]+$`, and an all-digit out-of-range value still reached
 #     `exit`). Two distinct wrong behaviours are pinned here, both MEASURED on this bash rather
 #     than reasoned about: `exit 99999999999999999999` dies "numeric argument required" rc 2 —
 #     the very crash this guard's comment claims to have removed — and `exit 300` silently
@@ -117,7 +116,7 @@ rm -f "$TSK_STATE/$J-new:run.tmp.2"
 
 # H3d (hermetic). the SAME age sweep, with TSK_STATE reached through a SYMLINK — the one
 # condition H3c cannot see, because its own TSK_STATE is a real directory (follow-up round
-# F1, ledger D114). `find` defaults to -P and will not descend a symlink named as a starting
+# F1). `find` defaults to -P and will not descend a symlink named as a starting
 # point, so the sweep matched nothing, deleted nothing and exited 0: the reclamation this
 # code exists to provide, silently absent. H3c IS this pin's positive control — same command,
 # same name shape, same age, real directory — so a red here is about the symlink and nothing
@@ -126,7 +125,7 @@ _sl_real="$TMP/slreal"; _sl_link="$TMP/sllink"
 mkdir -p "$_sl_real"; ln -s "$_sl_real" "$_sl_link"
 : > "$_sl_real/$J-sl:run.tmp.7"; touch -d '3 hours ago' "$_sl_real/$J-sl:run.tmp.7"
 # assert the sweep has work before asking whether it did it: an empty state dir would let a
-# missing-file check report success for the wrong reason (ledger D59 — zero matches is
+# missing-file check report success for the wrong reason (zero matches is
 # instrument failure, not a pass)
 if [ -e "$_sl_real/$J-sl:run.tmp.7" ]; then
   TSK_STATE="$_sl_link" "$TSK" clean --all-finished
@@ -144,7 +143,7 @@ rm -rf "$_sl_real" "$_sl_link"
 "$TSK" nonsense-verb 2>&1 | tail -1 | grep -q "tsk clean" \
   && ok "help output ends at the verb list" || no "help output leaks past the verb list"
 
-# H5 (hermetic). the runner script's WRITE is checked, not only its rename (ledger D116).
+# H5 (hermetic). the runner script's WRITE is checked, not only its rename.
 #     Installing a runner is two steps and only the second was hardened. A SHORT write —
 #     ENOSPC, quota — leaves a TRUNCATED script that `chmod +x` and the checked `mv` then
 #     install without complaint; systemd-run executes it, so the job never runs its command,
@@ -177,7 +176,7 @@ ls "$TSK_STATE/$J-catfail":run.tmp.* >/dev/null 2>&1 \
 # H5b (hermetic). the third step of the same install — chmod — is checked too. Added because
 #      mutation caught it going UNPINNED: dropping its check left the whole suite green while
 #      H5 stayed red for cat, so the fix would have shipped with two of three steps proven and
-#      the middle one resting on nobody's word but the author's (ledger D15 family).
+#      the middle one resting on nobody's word but the author's.
 printf '#!/bin/bash\nexit 1\n' > "$_h5stub/chmod"; chmod +x "$_h5stub/chmod"
 rm -f "$_h5stub/cat"   # cat must succeed here: this pins the STEP AFTER it
 _h5bout=$(PATH="$_h5stub:$PATH" "$TSK" run "$J-chmodfail" -- true 2>&1); _h5brc=$?
@@ -188,9 +187,9 @@ else
 fi
 
 # H6 (hermetic). a run that fails to START keeps the previous log AND the previous result.
-#     The log half pins a RULING [Thomas, 2026-08-09, ledger D117]: a failed start is when the
+#     The log half pins a deliberate ruling (2026-08-09): a failed start is when the
 #     previous run's output is most worth having, so `.log` is deliberately absent from every
-#     cleanup list, and `tsk`'s help says so. The result half pins the D117 ROOT NOTE, closed
+#     cleanup list, and `tsk`'s help says so. The result half pins the earlier gap, closed
 #     2026-08-10: rc/done are STASHED pre-flight and restored on a failed start, so log, rc
 #     and done all describe the same previous run (the old pre-flight clear left a kept log
 #     with no result — `status` said unknown against a readable log). If someone later
@@ -204,9 +203,9 @@ printf '#!/bin/bash\nprintf "#!/usr/bin/env bash\\n"\nexit 1\n' > "$_h5stub/cat"
 rm -f "$_h5stub/chmod"
 PATH="$_h5stub:$PATH" "$TSK" run "$J-keeplog" -- true >/dev/null 2>&1
 if [ -s "$TSK_STATE/$J-keeplog.log" ]; then
-  ok "a failed start keeps the previous run's log (ruled: D117)"
+  ok "a failed start keeps the previous run's log (as ruled)"
 else
-  no "a failed start deleted the previous run's log — the help line and D117 say it is kept"
+  no "a failed start deleted the previous run's log — the help line and the ruling say it is kept"
 fi
 if [ "$(cat "$TSK_STATE/$J-keeplog.rc" 2>/dev/null)" = "0" ] && [ -e "$TSK_STATE/$J-keeplog.done" ]; then
   ok "a failed start restores the previous result, consistent with the kept log"
@@ -216,7 +215,7 @@ fi
 rm -f "$TSK_STATE/$J-keeplog".{log,rc,done,run,cmd} "$TSK_STATE/$J-keeplog":prev.{rc,done}
 rm -rf "$_h5stub"
 
-# H7 (hermetic). a restore that FAILS is said, not swallowed (ledger D274). H6 pins the restore
+# H7 (hermetic). a restore that FAILS is said, not swallowed. H6 pins the restore
 #     when it works; this pins it when it does not. stash_back's two restore `mv`s used to run
 #     unchecked and `return 0` — the mirror of the CHECKED forward stash below them, hardened
 #     for exactly this reason by 91331eb — so a failed restore left the previous result in
@@ -399,7 +398,7 @@ fi
 #     the unit itself (systemctl show), not from tsk's own record of where the runner is, so
 #     the check holds whatever tsk believes. Before the unique runner path the loser renamed
 #     its runner onto the shared path the unit executes: this read `true`, deterministically,
-#     where the end-to-end marker below only went red when the loser won the open (D122).
+#     where the end-to-end marker below only went red when the loser won the open.
 if [ -n "$_4k_exec" ] && grep -q 'sleep 30' "$_4k_exec" 2>/dev/null && ! grep -q '( true )' "$_4k_exec" 2>/dev/null; then
   ok "the live unit's runner still holds the winner's command after a lost race"
 else
@@ -423,8 +422,8 @@ exec 8>"$TSK_STATE/$J-lockheld:run.lock" && flock -n 8
   && ok "refused start wrote no state files" || no "refused start wrote .cmd/.run under a held lock"
 exec 8>&-
 
-# 4m. a FAILED start RESTORES the previous result instead of destroying it (the D117 root
-#     note, closed): rc/done are stashed pre-flight and install_failed puts them back.
+# 4m. a FAILED start RESTORES the previous result instead of destroying it (the earlier
+#     gap, closed): rc/done are stashed pre-flight and install_failed puts them back.
 printf '7\n' > "$TSK_STATE/$J-keepres.rc"; touch "$TSK_STATE/$J-keepres.done"
 PATH="$racedir:$PATH" "$TSK" run "$J-keepres" -- true >/dev/null 2>&1 && no "failed start exited 0" || ok "failed start still refused"
 [ "$(cat "$TSK_STATE/$J-keepres.rc" 2>/dev/null)" = "7" ] && [ -f "$TSK_STATE/$J-keepres.done" ] \

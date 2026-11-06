@@ -1,4 +1,4 @@
-<!-- qq-contract v3 – keep this SHORT; it is injected into context every session. -->
+<!-- qq-contract v4 – keep this SHORT; it is injected into context every session. -->
 # Quintessence – operational contract (always-on)
 
 *Everything not saved will be lost.* A future instance of you starts blank, and this store is
@@ -29,8 +29,9 @@ the only channel to it. Record what a future you would need, and read it back to
 
 **What the store does not record:** it records what the writing session wrote. It cannot tell
 text quoted from somewhere else apart from a decision the user actually made – both arrive as
-the same bytes. The attribution convention in update-lines (which model wrote it, when, who is
-being quoted) is a discipline you keep; the tool neither enforces nor verifies it.
+the same bytes. Under an agent harness `qq update`/`qq new` stamp the writing model and session
+into the update-line themselves, so do not type that marker; *who is being quoted* is still a
+discipline you keep, and the tool neither enforces nor verifies it.
 
 **Naming referents (binding to reality):** name an artifact on another host with the host in
 front – `nas:/tank/x`, `homelab-pi:/etc/pihole/y` – so the claim binds and can be re-checked

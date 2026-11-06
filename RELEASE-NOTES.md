@@ -4,9 +4,34 @@
 # Release notes
 
 Changes that ask something of you, newest first. Everything else is in the commit log; this file
-is for the things you would want to know before or just after pulling.
+is for the things you would want to know before or just after pulling. Each section is dated by
+the day it reached `main`. From 0.16.0 on, a release also carries a version and a `vX.Y.Z` tag.
 
-## Unreleased — config paths resolve the same in the shell scripts and in `qq`
+## 0.16.0 — 2026-11-06 — a plugin version that moves, release tags, contract v4
+
+### What changed
+
+- **The plugin manifest carries a real version.** `.claude-plugin/plugin.json` and
+  `marketplace.json` said `0.1.0` through every release before this one; they now say `0.16.0`
+  and move with each release.
+- **Releases are tagged.** This one is `v0.16.0`. SECURITY.md's supported version is the latest
+  tag.
+- **`CONTRACT.md` is `qq-contract v4`.** It now says that under an agent harness `qq update` and
+  `qq new` stamp the writing model and session into the update-line, so a session should not type
+  that marker itself. `qq doctor` compares the header with the version `qq` expects.
+- **The documentation caught up with the last several releases:** the MCP passthrough's verb
+  allowlist, project-store discovery that ignores a `.quintessence/` this install did not make,
+  every `setup.sh` override, the idle-autosave hook's wake and its switch, where each write verb
+  takes its text from, and `qq ask`'s step-down to later endpoints.
+
+### What it asks of you
+
+- If you installed through the plugin marketplace, update the plugin and check that it reports
+  `0.16.0`; an install that decides on the version alone may not have taken earlier releases.
+- If you inject a copy of `CONTRACT.md` from somewhere other than this checkout, re-sync it:
+  `qq doctor` reports `CONTRACT.md v3 ≠ qq expects v4` until you do.
+
+## 2026-11-05 — config paths resolve the same in the shell scripts and in `qq`
 
 ### What changed
 
@@ -27,6 +52,11 @@ is for the things you would want to know before or just after pulling.
 - **Every Python entry point now exits 141, quietly, when the reader of its output closes early**
   (`qq menu | head -1`, say), on Python 3.14 as on 3.13, including `refs-resolve.py`, which used
   to exit 0 always; its own caller, `memory-commit.sh`, discards its output.
+- **Empty text given as an argument is refused.** `qq update`, `qq essence` and `qq new` exit 2
+  and write nothing when the text argument is empty or only whitespace.
+- **The idle-autosave switch reaches a timer already armed.** Setting
+  `QQ_IDLE_AUTOSAVE_DISABLE=1` in the config file now also stands down the timer an earlier turn
+  armed (it re-reads the setting on every poll), so the session is not woken one last time.
 
 ### What it asks of you
 
@@ -38,8 +68,22 @@ is for the things you would want to know before or just after pulling.
   store your config names.
 - If you set `QQ_REDACT_FILE=` (empty) expecting the default list to keep applying, it no longer
   does: point it at the list explicitly.
+- A script that passes `qq update`/`qq essence`/`qq new` a possibly-empty variable now gets exit 2
+  and nothing is written; check the value before calling.
 
-## Unreleased — idle-checkpoint autosave hook
+## 2026-10-24 — `qq digest` orders same-day HEADs the same on every host
+
+### What changed
+
+- **`qq digest` lists same-day HEADs in topic-name order** on every host. Before, ties were broken
+  by the system `sort`, which differs by locale and between GNU and uutils coreutils.
+
+### What it asks of you
+
+- If anything reads `qq digest` output positionally, same-day entries may now come in a
+  different order.
+
+## 2026-10-23 — idle-checkpoint autosave hook
 
 ### What changed
 
@@ -65,7 +109,7 @@ session had genuine new activity since its last checkpoint, and never on its own
 - Do not raise the delay toward 3600: idle compaction fires at 54–55 minutes of quiet and its
   transcript write resets the hook's clock.
 
-## Unreleased — `qq ask` endpoints, stricter text channels, installer paths
+## 2026-10-23 — `qq ask` endpoints, stricter text channels, installer paths
 
 ### What changed
 
@@ -91,7 +135,7 @@ session had genuine new activity since its last checkpoint, and never on its own
 - Scripts that pipe text into `qq new`, or pass `qq rewrite` its text as an argument, now get
   exit 2: pass `qq new` its text as an argument and pipe `qq rewrite` its text.
 
-## Unreleased — update-lines say which agent wrote them
+## 2026-08-10 — update-lines say which agent wrote them
 
 ### What changed
 
@@ -123,10 +167,10 @@ A commit can carry the same identity as a git trailer, which lets a line's attri
 cross-checked with `git log --format='%(trailers:key=Agent,valueonly=true)'` — but that needs a
 `prepare-commit-msg` hook, and **no such hook ships with this package**. Without one, expect no
 trailer and read the line on its own. Note also that where a subagent makes the write, the two can
-legitimately disagree: the update-line names the subagent's model, a trailer written by the
-estate's own hook names the parent's.
+legitimately disagree: the update-line names the subagent's model, while a trailer written by a
+parent-session hook names the parent's.
 
-## Unreleased — the crash-litter sweep no longer touches a bare `<target>.tmp`
+## 2026-08-05 — the crash-litter sweep no longer touches a bare `<target>.tmp`
 
 **If you cloned on or around 2026-08-02, read the last section — you may have one file to look
 at.**

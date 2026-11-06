@@ -127,6 +127,13 @@ class _Fixture(unittest.TestCase):
                 "lookalike": lookalike, "orphan": orphan, "generated": generated,
                 "config": config, "refs": refs}
 
+    def without_fixture_paths(self, out: str) -> str:
+        """`out` with the fixture root taken out of every path it names. A word asserted absent
+        from the report is then read in the report's own words, not in the name of the scratch
+        directory the fixture happens to sit under (tests/INVARIANTS.md
+        a-test-oracle-over-paths-does-not-read-the-scratch-directory-name)."""
+        return out.replace(self.home, "<home>")
+
     def run_tool(self, *argv):
         out = io.StringIO()
         with unittest.mock.patch.dict(os.environ, self.env, clear=True), \
@@ -205,7 +212,11 @@ class TestWhatIsListedIsSomethingItCanDelete(_Fixture):
         rc, out = self.run_tool("--delete")
         self.assertEqual(rc, 0, f"a run that listed only a directory reported a refusal:\n{out}")
         self.assertNotIn(d, out, f"a directory is not a `<target>.tmp` the old idiom wrote:\n{out}")
-        self.assertNotIn("refused", out, "nothing was claimed, so nothing can be refused")
+        # The output names fixture paths under TMPDIR; the word is read with them taken out, so the
+        # scratch directory's name cannot decide it (tests/INVARIANTS.md
+        # a-test-oracle-over-paths-does-not-read-the-scratch-directory-name).
+        self.assertNotIn("refused", self.without_fixture_paths(out),
+                         "nothing was claimed, so nothing can be refused")
         self.assertTrue(os.path.isdir(d), "and it is still there")
 
     def test_a_directory_wearing_a_temp_name_is_not_listed_in_a_directory_you_named(self):
@@ -218,7 +229,7 @@ class TestWhatIsListedIsSomethingItCanDelete(_Fixture):
         rc, out = self.run_tool("--delete", "--dir", base)
         self.assertEqual(rc, 0, f"the run exited non-zero over a refusal it caused itself:\n{out}")
         self.assertNotIn(d, out, f"listed a directory it cannot delete:\n{out}")
-        self.assertNotIn("Is a directory", out)
+        self.assertNotIn("Is a directory", self.without_fixture_paths(out))
         self.assertTrue(os.path.isdir(d))
 
     def test_a_symlink_wearing_a_temp_name_is_still_listed(self):
@@ -262,7 +273,7 @@ class TestFirstWriteOrphans(_Fixture):
                       "an interrupted first write leaves no sibling; listing it is the whole "
                       f"point of the section:\n{out}")
         self.assertIn("no sibling", out, "the listing must say WHY it is set apart")
-        self.assertNotIn("Nothing to do", out,
+        self.assertNotIn("Nothing to do", self.without_fixture_paths(out),
                          "a directory holding an orphan is not a clean estate")
         self.assertTrue(os.path.exists(orphan), "the default run deletes nothing")
 

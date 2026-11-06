@@ -20,19 +20,24 @@ platform, what an attacker would gain, and the smallest reproduction you can man
 ## What to expect
 
 - An acknowledgement that the report arrived and is being looked at.
-- A fix shipped in a tagged release, with the reporter credited unless you prefer otherwise.
+- A fix shipped in a tagged release (`vX.Y.Z` on `main`), with the reporter credited unless you prefer otherwise.
 
 There is no bounty program.
 
 ## Supported versions
 
-The latest tagged release. Fixes are not backported to earlier tags.
+The latest tagged release. Releases are tagged `vX.Y.Z` from `v0.16.0` on; the releases before
+it are the untagged commits on `main` before that tag, and are not supported. Fixes are not
+backported to earlier tags.
 
 ## Boundaries worth knowing (not vulnerabilities)
 
 - **Store text goes to the model endpoints you configure.** Embedding, `qq ask` and the
   remote face send HEAD and memory text to the endpoints named in your config, through an
-  opener that ignores `http_proxy`. Nothing scrubs secrets out of that text first: keep
+  opener that ignores `http_proxy`. `qq ask` walks `QQ_ASK_ENDPOINTS` in order, and an endpoint
+  that passes its probe but fails to answer is followed by the next one, which is sent the
+  question and an evidence pack from the same retrieval (sized for that endpoint), so one ask
+  can reach more than one endpoint: list only endpoints you would send any of it to. Nothing scrubs secrets out of that text first: keep
   credentials out of HEADs and facts, and use `QQ_REDACT_FILE` / the remote deny lists to
   withhold whole topics. `qq-redact.sh` withholds topics from a reader; it is not a secret
   scanner.

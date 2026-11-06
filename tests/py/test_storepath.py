@@ -159,7 +159,7 @@ class TestProjectDiscovery(unittest.TestCase):
         # a .quintessence ABOVE home must not be picked up (walk stops at home).
         with tempfile.TemporaryDirectory() as root:
             _scaffold(os.path.join(root, PROJECT_STORE_DIRNAME))   # above home
-            home = os.path.join(root, "home", "thomas")
+            home = os.path.join(root, "home", "user")
             cwd = os.path.join(home, "proj")
             os.makedirs(cwd)
             cfg = Config(env={}, config_file="/nonexistent", overrides={})

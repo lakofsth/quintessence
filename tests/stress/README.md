@@ -3,7 +3,7 @@
 Test instruments are never disposed of. Every harness a review or diagnosis round builds
 and validates gets committed here, verbatim-plus-parametrization, with its provenance and
 the numbers it produced — regression evidence is only evidence while the instrument that
-produced it can be re-run. (Ruling: Thomas, 2026-08-10, during the tsk race series.)
+produced it can be re-run. (Ruled 2026-08-10, during the tsk race series.)
 
 **Not part of the default suite, on purpose.** These loops deliberately create process
 and scheduling contention, and several drive real `systemd-run --user` units. Run them at
@@ -31,5 +31,5 @@ to the next session.
 
 | file | targets | provenance | result when retained |
 |---|---|---|---|
-| `stress-lied-manager-race.sh` | the DEEP duplicate-start window: a manager that mis-reports a live unit as inactive (stateful stub), looped end-to-end over run→race→stop | diagnosis round, 2026-08-10 (pre-fix repro of the command-substitution race) | pre-fix: 41/1300 failures at ambient load, uniform substituted-command signature; post-fix (flock series): the stubbed deep window stayed reachable — measured 1/200 on the first full run, then reported as a residual; CLOSED by the unique runner path (2026-11-02): a substitution now fails the run, ceiling 0 (ledger D272) |
+| `stress-lied-manager-race.sh` | the DEEP duplicate-start window: a manager that mis-reports a live unit as inactive (stateful stub), looped end-to-end over run→race→stop | diagnosis round, 2026-08-10 (pre-fix repro of the command-substitution race) | pre-fix: 41/1300 failures at ambient load, uniform substituted-command signature; post-fix (flock series): the stubbed deep window stayed reachable — measured 1/200 on the first full run, then reported as a residual; CLOSED by the unique runner path (2026-11-02): a substitution now fails the run, ceiling 0 |
 | `stress-concurrent-start.sh` | the REAL concurrent-start substitution race: N truly-parallel same-name `tsk run`s per iteration; asserts exactly one winner, every loser refuses with a known message, and no loser's marker reaches the winner's log | verification rounds, 2026-08-10 (post-fix) | 1,140 iterations, 0 failures at 9a78dfb; 300×4-way re-run clean at 91331eb |

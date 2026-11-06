@@ -6,7 +6,7 @@ priced.
 
 Entries are keyed by **subject**, not by a running integer: a number read off the tail
 collides the moment a branch is a second writer, and this repo is worked on branches. Cite
-an entry by its slug from commit messages, briefs and ledger rows.
+an entry by its slug from commit messages and review notes.
 
 ## `the-store-face-defines-no-write-verb`
 
@@ -17,7 +17,7 @@ retired the moment any write verb is added beside them, however carefully guarde
 
 *Instance that earned it:* a hosted feature needed a write verb (2026-08-27). Adding it here
 would have falsified nine claims across four files, including the `instructions` string a
-hosted session actually reads. Thomas ruled for a second process instead, which is why this
+hosted session actually reads. A second process was ruled for instead, which is why this
 entry exists to say what that ruling bought.
 
 - Site derivation: the `@mcp.tool()` decorations in `qq-remote-mcp`, read by AST rather than by
@@ -45,7 +45,7 @@ and the rung's 404 was reported as "healthy but the completion failed".
 - Site derivation: the arms of `Ask.probe_endpoint`, one per request shape, enumerated from
   `Ask._model_for` — the same reading `Ask._complete` builds the request body from, so a third
   request shape added tomorrow has one place to answer for and not two.
-- Pin: `tests/py/test_endpoint_model_certification.py` (landed by `e326a63`; certify `done/20260902T030532Z-certify-certify-a-named-ask-endpoint-is-certifie`).
+- Pin: `tests/py/test_endpoint_model_certification.py` (landed by `e326a63`; certify `20260902T030532Z`).
 
 ## `a-rung-that-fails-to-complete-falls-to-the-next`
 
@@ -70,7 +70,7 @@ server.
   return path out of `ask()`'s ladder loop. For the naming clause, every face that turns an
   `ask()` result into something read — enumerated from the callers of `quintessence.ask.render`,
   which is the one renderer.
-- Pin: `tests/py/test_ask_rung_ladder.py` (landed by `06c112c`; certify `done/20260902T030532Z-certify-certify-an-ask-rung-that-fails-to-comple`).
+- Pin: `tests/py/test_ask_rung_ladder.py` (landed by `06c112c`; certify `20260902T030532Z`).
 
 ## `a-test-that-needs-a-user-bus-skips-and-says-so`
 
@@ -86,22 +86,17 @@ cannot read must not be reported absent, and absence is the loud path — so on 
 invoker, not for the tree. Measured at `ed478f5`:
 `env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS bash tests/run.sh` →
 `Ran 1112 tests ... FAILED (errors=1, skipped=2)`, and green again on the spot with
-`XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus`. This is
-ledger **D40** and **D104** (open since the first contact: "environment-dependent gate", R6's own
-note being that this suite's guards were *hand-added per environment*), and it is not a disclosure
-that stays cosmetic, because it is the standing shape of every unattended run on this host:
-the queue worker unit is a SYSTEM unit and no fragment under `/etc/systemd/system/` sets
-either variable, so a queue worker has no user bus by construction. The bash half of the suite
+`XDG_RUNTIME_DIR=/run/user/$UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID/bus`. An earlier
+review had recorded this as an open "environment-dependent gate" (its note being that this
+suite's guards were *hand-added per environment*), and it is not a disclosure that stays
+cosmetic, because it is the standing shape of an unattended run started as a system unit: no
+such unit has a user bus unless its unit file sets either variable. The bash half of the suite
 already answered this way — `tests/test-tsk.sh` prints `SKIP: no systemd user manager on this
 host` and ran it in the same measurement — and this row is that precedent, derived instead of
-hand-added. And it becomes a LANDING condition the moment the estate's merge gate resolves this
-repository's own `tests/run.sh`: measured 2026-09-11 at the deployed gate revision, only
-the queue's own `tests/run.sh` is resolved today and the widening is on an unlanded branch — but that
-gate takes ABSOLUTE GREEN, so on the day it lands the environment of whoever runs the suite becomes
-a landing condition. Measured in the meantime, the same stripped environment makes `qq-promote
---go`'s own default gate (`python3 -m pytest tests/py -q` over the dev tip) come back
-`1 failed, 1109 passed, 2 skipped` at `ed478f5`, which fails safe — prod does not move — but does
-not move at all.
+hand-added. And a merge gate that takes ABSOLUTE GREEN over this repository's own `tests/run.sh`
+would make the environment of whoever runs the suite a landing condition: measured at `ed478f5`,
+the same stripped environment makes `python3 -m pytest tests/py -q` come back
+`1 failed, 1109 passed, 2 skipped`.
 
 - Site derivation: `_systemctl_surface()` in `tests/py/test_refs.py` — every function in
   `quintessence/refs.py` that passes a literal `systemctl` argv to a subprocess entry point, plus
@@ -130,8 +125,8 @@ not move at all.
   `FAILED (failures=1, errors=1)` without a bus — the original error plus the pin naming the
   site — and the pin fails on its own *with* a bus present; forcing the predicate to
   always-answer gives `failures=2, errors=1`; forcing it to always-refuse gives `failures=2` with
-  the guarded test skipping on a host that HAS a manager, which is the vacuous-skip shape D115
-  names and the reason the predicate is pinned in both directions rather than one.
+  the guarded test skipping on a host that HAS a manager, which is the vacuous-skip shape `tests/test-tsk.sh`'s
+  header names and the reason the predicate is pinned in both directions rather than one.
 - **Residual, not covered:** the guard asks only about the USER scope. A host where `systemctl` is
   installed but systemd is not PID 1 could refuse in the *system* scope too, and the driver would
   raise there with this guard satisfied. Not claimed either way — every host this was measured on
@@ -207,13 +202,13 @@ stepped past the 125B tier to a slower one, with only the answering endpoint cha
 - Site derivation: `_WHOLE_NUMBER_RE.fullmatch` in `_url_int_entries` — the one recognition
   point for both keys shaped `url=<whole number>` (`QQ_ASK_SLOTS` and `QQ_ASK_BUDGETS`), so a
   third key of this shape added later inherits the grammar without a new site.
-- Pin: `tests/py/test_ask.py::TestWholeNumberValueSpellings` (landed by `9b42d10`; certify `done/20260929T003639Z-certify-certify-a-url-whole-number-config-value`).
+- Pin: `tests/py/test_ask.py::TestWholeNumberValueSpellings` (landed by `9b42d10`; certify `20260929T003639Z`).
 
 ## `a-typed-integer-read-from-configuration-is-ascii-decimal-digits-only`
 
 **A typed integer read from configuration is accepted only as ASCII decimal digits; every other spelling is refused with the field named, the same way a malformed `url=` is.**
 
-*Instance that earned it (D893):* `Config._coerce`'s int branch was a bare `int(raw)`, so `QQ_LOCK_WAIT=1_000`, `+7`, ` 5` or Arabic-Indic digits were accepted as numbers the operator may not have written, while the `url=<whole number>` grammar (D890) refused the same spellings — two grammars in one file.
+*Instance that earned it:* `Config._coerce`'s int branch was a bare `int(raw)`, so `QQ_LOCK_WAIT=1_000`, `+7`, ` 5` or Arabic-Indic digits were accepted as numbers the operator may not have written, while the `url=<whole number>` grammar refused the same spellings — two grammars in one file.
 
 - Site derivation: `Config._coerce`'s int branch (`_WHOLE_NUMBER_RE` / `_SIGNED_INT_RE` in `quintessence/config.py`), reached by every registered `int` key via `get`. The only key admitting a leading `-` is `QQ_EMBED_NUM_GPU` (Ollama `num_gpu`, -1 = automatic). Refusal is a `ConfigError` naming the key.
 - Sweep: other `int(` sites take regex-derived or non-config text (`ask._url_int_entries` is already grammar-guarded; refs/findings/cli parse regex groups or `--ref` text), so none reads raw config text.
@@ -332,7 +327,7 @@ unbounded (L5); non-HTTP scopes bypassed the bearer check (L4).
 producers' own templates emit; a backticked span inside an LLM-written or proposed text is
 never promoted.** PROPOSED-write and AUDIT lines embed untrusted text verbatim (M9).
 
-- Site derivation: every `qq` command `cli.render_findings_next` emits — the T2-stale `waveoff`, the T1-size `compact`/`brief`, the PROPOSED-write `qq {verb} {head}` and the generic backtick extraction — all pass through `cli._ready` (`_READY_CMD_RE.fullmatch`). The generic backtick extraction is reached only by a line that is NOT a PROPOSED write: the branch is chosen by the line's `[PROPOSED write]` class marker, not by whether the structured parse succeeded, so a PROPOSED line whose parse fails (e.g. a model name with a space) offers no command and says so (D1059; before, it fell through to the generic branch).
+- Site derivation: every `qq` command `cli.render_findings_next` emits — the T2-stale `waveoff`, the T1-size `compact`/`brief`, the PROPOSED-write `qq {verb} {head}` and the generic backtick extraction — all pass through `cli._ready` (`_READY_CMD_RE.fullmatch`). The generic backtick extraction is reached only by a line that is NOT a PROPOSED write: the branch is chosen by the line's `[PROPOSED write]` class marker, not by whether the structured parse succeeded, so a PROPOSED line whose parse fails (e.g. a model name with a space) offers no command and says so (before, it fell through to the generic branch).
 - Pin: `tests/py/test_trust_boundaries.py::TestReadyCommands`; `tests/py/test_ready_command_template.py::TestReadyCommandFromTemplate::test_proposed_unparseable_line_does_not_promote_backticks_in_text` (the unparseable-PROPOSED case).
 
 ## `a-ready-proposed-verb-is-a-gated-verb`
@@ -425,7 +420,7 @@ is `%q`/`shlex.quote`d at the interpolation.** (L7, L8)
 **Every path override `setup.sh` reads (`BIN_DIR`, `QUINTESSENCE_DIR`, `QQ_MEMDIR`,
 `CLAUDE_SETTINGS`, `SKILLS_DIR`) has a leading `~` or `~/` expanded against `$HOME` before
 any path is built from it, and a `~user` form is refused loudly; no override ever produces a
-literal `~` directory under the working directory.** (ledger D92: a quoted
+literal `~` directory under the working directory.** (A quoted
 `CLAUDE_SETTINGS='~/.claude/settings.json'` used to wire `./~/.claude/settings.json` and say
 "Done." with the real settings untouched.)
 
@@ -440,8 +435,7 @@ literal `~` directory under the working directory.** (ledger D92: a quoted
 
 **`tsk`'s `stash_back` checks both restore `mv`s and, when either fails, names the stranded
 `:prev` file on stderr and returns non-zero, instead of returning 0 with the previous result
-left where `status`, `rc` and `wait` do not look.** (ledger D274, the mirror of the CHECKED
-forward stash.)
+left where `status`, `rc` and `wait` do not look.** (The mirror of the CHECKED forward stash.)
 
 - Site derivation: the two `mv`s in `stash_back`; its callers (`install_failed`, `run`'s EXIT
   and INT/TERM traps) keep their own exit status.
@@ -451,7 +445,7 @@ forward stash.)
 
 **The text `qq ask` prints (`ask.render()`) names the rung that actually answered — the same
 value as `result["endpoint"]` — on every path that prints an answer, including a step-down
-after a failed rung, and never the rung the ladder started at.** (ledger D424 residual: the
+after a failed rung, and never the rung the ladder started at.** (A review residual: the
 `answered by` line could be deleted with the suite green.)
 
 - Site derivation: the `answered by` line in `render()`, fed by the `endpoint` that `ask()`
@@ -476,7 +470,7 @@ author's same-commit route to making it true, and the gate's failure message nam
 - Site derivation: the gate and the tool share one definition of what is counted and where it is
   read (`COLLECT_ARGV`, `COLLECTED`, `PYTHON_ROW`, `SHELL_ROW` in the tool, imported by the gate),
   so there is one collection and no second copy to drift.
-- Pin: `tests/py/test_sync_assurance_counts_certify.py` (landed by `18b65ff`; certify `done/20261022T015228Z`, red end by mutation: the earlier certify `stuck/20261018T223105Z` was parked because the tool does not exist at its pre_fix).
+- Pin: `tests/py/test_sync_assurance_counts_certify.py` (landed by `18b65ff`; certify `20261022T015228Z`, red end by mutation: the earlier certify `20261018T223105Z` was parked because the tool does not exist at its pre_fix).
 
 **Amendment, 21 Oct 2026 (the clean-checkout clause): the count the tool writes and the gate
 checks is the count a clean checkout of the commit gives — the gate fails, naming the cause, on
@@ -501,7 +495,7 @@ checkout was red; and a one-test collection would be refused as a failed collect
 - Checks: `tests/py/test_assurance_counts.py` `TestTheGateJudgesWhatACleanCheckoutCollects`
   (the gate on fixture engines, the clean-checkout claim on a fresh clone with a control) and
   `tests/py/test_sync_assurance_counts.py` (the tool, `read_collected`).
-- Pin (amendment): `tests/py/test_count_gate_clean_checkout.py` (landed by `0af2c12`; certify `done/20261020T231632Z`).
+- Pin (amendment): `tests/py/test_count_gate_clean_checkout.py` (landed by `0af2c12`; certify `20261020T231632Z`).
 
 **Amendment, 21 Oct 2026 (the index clause, amending the clean-checkout clause): the tool and
 the gate count what a clean checkout of the commit gives by counting the index — collection
@@ -515,7 +509,7 @@ cannot name another index.**
 *Instance that earned it:* the clean-checkout clause above disclosed that an author who adds a
 test function to an existing tracked file and runs the tool before staging writes a figure a
 clean checkout of the commit cannot reproduce, so the gate goes red at the landing; and the
-`GIT_*` stripping that clause relied on was pinned by nothing (done/20261020T230413Z notes[0],
+`GIT_*` stripping that clause relied on was pinned by nothing (certify 20261020T230413Z, notes[0],
 notes[1]).
 
 - Choice: collect a checkout of the index, not refuse a dirty tree. The gate shares the tool's
@@ -538,7 +532,7 @@ notes[1]).
   added test function, with the tool's figure green in a fresh clone and a control; a tracked
   test and suite deleted from the working tree; a staged new test file; a committed
   `.gitignore` rule, and a file force-added past it; `GIT_INDEX_FILE` naming another index).
-- Pin (index clause): `tests/py/test_count_gate_counts_the_index.py` (landed by `00f56e1`; certify `done/20261024T041355Z`). Not covered by the check: `GIT_WORK_TREE` and other `GIT_*` variables beyond `GIT_INDEX_FILE` and `GIT_DIR`, and a staged deletion of a tracked test file whose working-tree copy is restored.
+- Pin (index clause): `tests/py/test_count_gate_counts_the_index.py` (landed by `00f56e1`; certify `20261024T041355Z`). Not covered by the check: `GIT_WORK_TREE` and other `GIT_*` variables beyond `GIT_INDEX_FILE` and `GIT_DIR`, and a staged deletion of a tracked test file whose working-tree copy is restored.
 
 **Amendment, 21 Oct 2026 (the unresolved-index clause, amending the index clause): the tool and
 the gate refuse, naming the files and writing nothing, while the index holds an intent-to-add
@@ -555,7 +549,7 @@ out the whole file, saying it was "counted as staged".
 - Site derivation: every read of the index in the tool goes through `counted_tree` or
   `count_shell_suites`, and both call `refuse_unresolved_index` first; `unstaged_tests` is
   de-duplicated.
-- Pin (unresolved-index clause): the intent-to-add and unmerged cases of `tests/py/test_count_gate_index.py` (landed by `b9c2ffd`; certify `done/20261021T062026Z-commissioned-certify-the-count-tool-and-gate-refuse-a`, which ran them red at `ce71167` and green at `5374ebe` and added no check of its own).
+- Pin (unresolved-index clause): the intent-to-add and unmerged cases of `tests/py/test_count_gate_index.py` (landed by `b9c2ffd`; certify `20261021T062026Z`, which ran them red at `ce71167` and green at `5374ebe` and added no check of its own).
 
 **Amendment, 26 Oct 2026 (the index-read clause, amending the unresolved-index clause): the tool
 finds an intent-to-add entry by reading the index itself — what `ls-files` lists under tests/
@@ -575,7 +569,7 @@ deletion, and `--check` said "stale" instead of refusing.
   `write-tree` runs on a copy of the index into a scratch object directory, so the engine's index
   and objects are untouched. The other working-tree `diff` of tests/, `unstaged_tests`, pins
   `--no-renames`, so a renamed file's old path is named as left out.
-- Pin (index-read clause): `tests/py/test_count_tool_ita_index_read_certify.py` (landed by the commit that carries it; certify `stuck/20261026T015652Z-certify-certify-the-count-tool-refuses-an-intent`, red at `4d3b8fd` 4 of 7, green at `e07141c` 7 of 7).
+- Pin (index-read clause): `tests/py/test_count_tool_ita_index_read_certify.py` (landed by the commit that carries it; certify `20261026T015652Z`, red at `4d3b8fd` 4 of 7, green at `e07141c` 7 of 7).
 
 **Amendment, 21 Oct 2026 (the summary-line clause, amending the index clause): the tool and the
 gate read the collected count only from pytest's final summary line, matched whole — a node id
@@ -599,14 +593,14 @@ passed the gate before the commit and was red at the landing.
   unreadable. The gate's `_documented` reads `stated_doc` (the index's ASSURANCE.md, `git show
   :ASSURANCE.md`; the file itself outside a checkout), as does the tool's `--check`; the tool's
   write still edits the working-tree file, and says so when the result is unstaged. Class sweep
-  (21 Oct 2026): no other reader of pytest's summary in `tools/`, `tests/` or `qq-promote`, which
-  reads pytest's exit code only; `tests/run.sh` reads suite exit codes.
+  (21 Oct 2026): no other reader of pytest's summary in `tools/`, `tests/` or the author's promote script,
+  which reads pytest's exit code only; `tests/run.sh` reads suite exit codes.
 - Checks: `tests/py/test_sync_assurance_counts.py` (a fixture engine with the id
   `[7 tests collected]`; `read_collected` over output shapes, by subTest so no sample becomes an
   id; the deselected shape, unit and by a deselecting conftest; `--check` on an unstaged figure)
   and `tests/py/test_assurance_counts.py` `TestTheGateJudgesWhatACleanCheckoutCollects` (the
   same three on the gate).
-- Pin (summary-line clause): `tests/py/test_count_summary_line_certify.py` (landed by `bee7f97`; certify `done/20261021T064715Z`).
+- Pin (summary-line clause): `tests/py/test_count_summary_line_certify.py` (landed by `bee7f97`; certify `20261021T064715Z`).
 
 ## `an-idle-session-is-woken-once-per-stretch-of-new-work-and-never-by-its-own-checkpoint`
 
@@ -616,7 +610,7 @@ had genuine user activity since its last checkpoint — where a rewake delivery,
 scaffolding and the session's own command-position `qq` write are never genuine activity — and a
 newer arm of the same session stands the older one down by its stored PID alone.**
 
-*Instance that earned it:* the hook's two measured failures in use (HEAD `session-idle-autosave`):
+*Instance that earned it:* the hook's two measured failures in use:
 at a 3300 s delay Claude Code's idle compaction (54m19s–55m24s of quiet, 24 of 24 records,
 2026-10-23) wrote the transcript first and reset the quiet clock, so the autosave lost the race 22
 of 24 times; and a bare `/clear` injected scaffolding records that were counted as activity, so a
@@ -640,7 +634,7 @@ after the terminator — and a scan whose output is not its input's length raise
 CLI printing nothing for such a command so the caller reads no match and errs toward waking once
 more rather than toward suppressing a wake.**
 
-*Instance that earned it:* the 3a10cd1 port predated the estate mask's 2026-10-26 heredoc reader, so
+*Instance that earned it:* the 3a10cd1 port predated the 2026-10-26 heredoc reader of the quote mask it was ported from, so
 a `cat > f <<'EOF'` body with a line starting `qq update` folded to `;qq update …`, matched the
 command-position grep, and absorbed the session's genuine activity at the next Stop (and an
 apostrophe in a body masked a real write after the `EOF`).
@@ -841,7 +835,7 @@ repair is one normalisation, `_qq_untilde_path_keys` in `qq-config.sh`, over bot
 file a start writes before `systemd-run` has created its unit is one another start's unit reads
 or another start's records hold.**
 
-*Instance that earned it:* ledger D122, D271 and D272. A start that lost the deep duplicate-start
+*Instance that earned it:* a start that lost the deep duplicate-start
 race (a manager mis-reporting the live unit as inactive) renamed its runner onto the shared
 `$STATE/<name>.run` the live unit executes, inside the winner's fork-to-first-open gap, and wrote
 `.cmd` over the winner's: the refused caller's command ran under the winner's name. Test 4k's
@@ -871,16 +865,42 @@ load), and the stress lane counted the substitution and left it out of its exit 
 
 ## `a-test-oracle-over-paths-does-not-read-the-scratch-directory-name`
 
-**A test's oracle over paths must not depend on the ambient scratch directory's name: an
-assertion about which fixture file a path names compares the part of the path the fixture
-created (its basename, or a name relative to the fixture base), or a nonce name that cannot
-occur in TMPDIR, never a fixed word searched for anywhere in the full path.**
+**No assertIn or assertNotIn in `tests/py` has a verdict that depends on the name of the
+ambient scratch directory: a word or phrase asserted present in, or absent from, a path or an
+output that names paths under TMPDIR is read with the fixture's root taken out (a basename, a
+name relative to the fixture base, the output with the root replaced), or is a nonce that cannot
+occur in TMPDIR, never a fixed word searched for anywhere in the full text.**
 
-*Instance that earned it:* ledger D1344. `test_long_lived_instance_sees_a_head_written_after_first_call`
+*Instance that earned it:* `test_long_lived_instance_sees_a_head_written_after_first_call`
 asserted that `"late"` occurred in no full hit path, so it was red at b1130d8 under any TMPDIR
 containing `late` (a worker scratch named `...later-round...`) and green under a neutral one.
 
-- Site derivation: the assertions in `tests/py/` that apply `in` to a hit path or to a set of them,
+*Second instance, which widened the sentence from hit paths to any output naming paths:*
+fix-review 20261102T222427Z F1. `test_a_directory_wearing_a_temp_name_is_not_listed_as_litter`
+asserted `"refused"` absent from a report that lists absolute fixture paths, so it was red under
+any TMPDIR holding `refused`, and the grep below could not see an `assertNotIn(word, output)`.
+
+- Site derivation (since the second instance): `python3 tests/review-instruments/scratch-name-oracle-probe.py`
+  — it runs the whole python suite as `tests/test-py.sh` does, with `assertIn`/`assertNotIn`
+  wrapped, and at every call whose container holds the scratch root it evaluates the membership
+  twice: with the root replaced by a neutral name, and by a name carrying the member. A call
+  whose two answers differ is a site. It quantifies over the calls the suite executes (1342
+  tests, 3 skipped, on the author's host at 8e93495), so a skipped test's sites are not seen, and it
+  exempts a member carrying 12+ hex digits as a per-run nonce. At 8e93495 it reported nine
+  sites: `test_reclaim_legacy_temps.py` (`refused`, `Is a directory`, `Nothing to do`),
+  `test_dispatcher.py` (`LEGACY-CALLED`, three calls), `test_admin.py` (`git author identity not
+  configured`), `test_atomicio.py` (`temp-name room`), `test_remote_policy_startup.py` (`not
+  found`). The reclaim, admin, atomicio and remote-policy sites now read the output with the
+  fixture root replaced; the dispatcher's tripwire word carries a per-run `uuid4` nonce.
+- Check (since the second instance): the probe above, exit 1 and nine sites red at 8e93495, exit 0
+  after the change; its `--self-test` reports a planted path site and not a path-free one or a
+  nonce. And each of the five files run under a TMPDIR named after each of the seven words: red
+  at 8e93495 for every word (the `LEGACY-CALLED` directory: 3 failed; each other: 1 failed),
+  green after the change. Mutations, each red with the change: the reclaim tool listing a
+  directory again (`is_dir` filter's `continue` made `pass`, with the test's earlier asserts
+  removed) fails the `refused` oracle; `qq reindex` calling the `qq-legacy` stub fails two
+  tripwire tests.
+- Site derivation (first instance): the assertions in `tests/py/` that apply `in` to a hit path or to a set of them,
   found with `grep -nE 'in (p|h\["path"\]) for' tests/py/*.py` at 61e15ec. That found six
   assertions: `test_search.py` (the `late` pair above, plus the two `secret-topic` assertions in
   `TestRedaction`) and `test_searchcompose.py` (`ptopic` and `u.md` in
@@ -889,15 +909,20 @@ containing `late` (a worker scratch named `...later-round...`) and green under a
   The redaction tests also use `_nonce_slug`, because the product's matcher
   (`SearchIndex._slug_redacted`) matches a redact entry as a substring of the whole path, so a
   fixed slug under a TMPDIR of the same name redacts every hit, the public fixture included.
-- Check: running the two files under a TMPDIR whose name holds the word. Red at 61e15ec with
+- Check (first instance): running the two files under a TMPDIR whose name holds the word. Red at 61e15ec with
   `TMPDIR=<scratch>/scratch-later-round` (1 failed, the `late` test) and with
   `TMPDIR=<scratch>/secret-topic-x` (2 failed, both redaction tests); green after the change
   under those two, under `ptopic-u.md-x`, and under a neutral name (89 passed each time).
   Mutations, each red alone: the test writes `early.md` instead of `late.md` (1 failed, so the
   basename oracle still sees the file's absence); the redact file lists a slug other than the
   nonce (2 failed).
-- Not covered, on purpose: no lint enforces the shape. The derivation is the grep above, re-run
-  by hand. In production the redaction matcher's substring rule is applied to a HOME-relative
+- Not covered, on purpose: no gate enforces the shape. The probe takes about five minutes, the
+  length of the python suite itself, and `tests/run.sh` does not run it; it is re-run by hand.
+  It does not see a plain `word in text` outside an assert call, a membership wrapped in
+  `assertTrue`, or a container naming the root by a symlinked spelling it did not resolve. In
+  `test_reclaim_legacy_temps.py` the `Is a directory` assertion in the `--dir` test does not go
+  red when the tool lists a directory again (the directory has no sibling there, so `--delete`
+  does not claim it); that weakness predates this change and is not this sentence's. In production the redaction matcher's substring rule is applied to a HOME-relative
   path, and whether it should stay a substring rule is the open redaction-scope question in
   `_filter_redacted`'s docstring, not something this test change decides.
 
@@ -918,9 +943,14 @@ BrokenPipeError` caught it, so the suite was green on the author's host — but 
 hole for a write a few hundred bytes past the pipe (66,000 bytes into a 64 KiB pipe returns on
 both). `qq` was the only entry point that handled EPIPE at all, and none flushed inside a handler.
 
-- Site derivation: every git-tracked file outside `tests/` whose module body holds an
-  `if __name__ == "__main__":` block, parsed with `ast` (extensionless entry points included).
-  At this change that is 17 files: the repo-root scripts and `tools/*.py`.
+- Site derivation: every git-tracked file outside `tests/` that parses with `ast` and whose module
+  body holds an `if __name__ == "__main__":` block, whatever its name or shebang (`entry_points()`
+  in the check; a `.py` file that does not parse is an error, not a skip). Until 2026-11-05 the
+  derivation kept an extensionless file only with `python` in its shebang, so the MCP servers
+  (`#!/usr/bin/env -S uv run --script`) fell outside it and it derived fewer than this line said
+  (fix-review 20261105T123503Z, N1). At this tree that is 15 files: the repo-root scripts, the
+  two `qq-*-mcp` servers and `tools/*.py`. The number is held to the derivation by
+  `test_the_register_states_the_derived_count`, so adding or losing an entry point moves both.
 - Check: `tests/py/test_pipeexit.py`. `TestEveryEntryPointEndsThroughPipeexit` derives the entry
   points through `tests/py/_treefiles.py` and requires each `__main__` block to end in
   `pipeexit.run(...)` with only imports and `sys.path` calls before it (its control refuses
@@ -962,6 +992,80 @@ before its `git init`: `test_config_path_parity.py` and `test_path_key_tilde_par
   `*.log`, `*.pyc` and a non-`.pyc` file inside `__pycache__/`. Red at 7499986: the two parity
   tests in a plain copy (3 errors, `ls-files` exit 128). Mutation: the walk applies no
   directory pattern (the fixture test, red).
-- Not covered, on purpose: `.gitignore` syntax beyond one fnmatch pattern per line, with a
-  trailing `/` for directories (no negation, no anchored or nested-directory patterns), and
-  nested `.gitignore` files; the checkout comparison fails if this repo's file outgrows that.
+- Not covered, on purpose: (superseded by
+  `the-export-walk-leaves-out-what-every-gitignore-of-the-tree-leaves-out`, which now carries
+  nested `.gitignore` files, negation, anchored and `**` patterns.) What git reads besides the
+  tree, `.git/info/exclude` and global excludes, which an export does not carry.
+
+## `the-export-walk-leaves-out-what-every-gitignore-of-the-tree-leaves-out`
+
+**`tests/py/_treefiles.walk_files` names exactly the files on disk that the tree's own
+`.gitignore` files at every depth leave in — what git names as tracked files on disk plus
+untracked ones that `git ls-files --others --exclude-per-directory=.gitignore` lists, wherever no
+tracked file is covered by an ignore file (`no-tracked-file-is-covered-by-an-ignore-file`, below)
+— whatever ignore file a tool has written below the top.**
+
+*Narrowed 6 Nov 2026:* the blind certify `20261105T134920Z` read the earlier sentence
+("tracked files on disk", unconditionally) as not held: a file force-added under a nested `*`
+ignore is named by git and dropped by the walk, and a filesystem walk cannot know a file is
+tracked. None existed at `889f248` (`git ls-files -ci` empty). The tracked-file clause is scoped
+to the tree the pin keeps, and the pin is its own invariant. The certify's other seven
+directions are its check `tests/py/test_treefiles_nested_gitignore_certify.py`, green at
+`889f248` and red at `7c39c67`; its eighth now asserts the walk drops such a file and the pin's
+instrument names it.
+
+*Instance that earned it:* fix-review 20261105T123503Z (finding 1, at 85c8eab): the walk read only
+the top-level `.gitignore` while `test_the_walk_names_what_git_does_not_ignore` built its expected
+set with `--exclude-standard`, so after one `python3 -m pytest tests/py -q` the
+`.pytest_cache/.gitignore` of `*` that pytest writes put 9 extra paths in the walk and the test was
+red on a correct tree — the state of the author's development checkout then; a `.venv/.gitignore`
+from `uv venv` did the same, and in an export holding a `.venv` would have pulled site-packages
+`__main__` files into `test_pipeexit.entry_points()`.
+
+- Site derivation: `grep -rln '_treefiles\.' tests/py/*.py` — every caller of the walk, directly or
+  through `engine_files` in a plain copy: `test_config_path_parity.py`,
+  `test_path_key_tilde_parity.py`, `test_pipeexit.py` and `test_treefiles.py` (the grep also lists `_treefiles.py` itself). The rules bind every
+  `.gitignore` the walk enters, which `os.walk` derives.
+- Check: `tests/py/test_treefiles.py`. `test_the_walk_honours_every_gitignore_the_tree_carries`
+  compares the walk with git on a fixture repo holding `.pytest_cache/.gitignore` and
+  `.venv/.gitignore` (`*`) and a nested `pkg/.gitignore` with an anchored pattern, an inner-slash
+  pattern, `**`, a directory-only rule beside a file of that name, a negation and an escaped `#`;
+  `test_the_walk_names_what_git_does_not_ignore` compares it on this checkout, against the same
+  `--exclude-per-directory=.gitignore` listing (like with like: an export carries no
+  `.git/info/exclude` and no global excludes). Red at 7c39c67 (the fixture test: the nested files'
+  paths listed). Mutations, each red alone on the fixture test: nested files not read; negation
+  read as exclusion; anchoring off; `**` matching one level only; directory-only rules applied to
+  files; the leading-`\` escape not stripped. The top-level `.gitignore` also names
+  `.pytest_cache/` and `.venv/`.
+- Not covered, on purpose: `.git/info/exclude`, `core.excludesFile` and a `.gitignore` inside a
+  directory git leaves out (git does not read one either); an escaped trailing space keeps its
+  backslash.
+- Not covered, stated (round 2's notes N1 and N2;
+  "exactly" holds only for the syntax claimed above): bracket negation `[^...]`, POSIX character
+  classes, an inner backslash escape, a byte-order mark (it drops the first rule), and a non-UTF-8
+  `.gitignore` (the walk raises) — reopen when any `.gitignore` in the repo or written by a tool
+  uses one, or the walk is reused on a tree not authored here; and an untracked symlink to a
+  directory, or a nested repository or worktree inside a checkout, where walk and git disagree —
+  reopen when a workflow creates either inside a checkout or an export.
+
+## `no-tracked-file-is-covered-by-an-ignore-file`
+
+**No file git tracks in this tree is covered by one of the tree's own `.gitignore` files:
+`git ls-files -c -i --exclude-per-directory=.gitignore` lists nothing.**
+
+*Instance that earned it:* the blind certify `20261105T134920Z` of the export walk: a file
+force-added under a nested `*` ignore (`gen/pinned.txt`) is tracked, so it ships in a
+`git archive` export, but the walk an export runs drops it, so every test that derives its sites
+from the walk would skip it silently. None exists at `889f248`; this keeps it so.
+
+- Site derivation: `git ls-files -c -i --exclude-per-directory=.gitignore` — git's own listing
+  over every tracked path, which `_treefiles.tracked_under_ignore` runs.
+- Check: `tests/py/test_no_tracked_file_under_ignore.py`: this checkout lists none (skipped in an
+  export, which has no index to ask); on a scratch repo with a force-added file under `gen/*`
+  the instrument names exactly it (the negative's control). Red at: no commit — no tracked file
+  under an ignore has existed (`git ls-files -ci` empty at 889f248 and at 5bf872b, where this
+  landed); the checkout row is shown red by the `-i` mutation below. Mutations: the instrument returns
+  nothing (its control and the certify's eighth row go red); the `-i` filter dropped (this
+  checkout's row goes red, listing every tracked file).
+- Not covered: `.git/info/exclude` and `core.excludesFile`, for the walk's reason.
+

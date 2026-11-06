@@ -3,7 +3,7 @@
 # Retained by fix-review 20261102T222427Z (report: a private review record).
 # Not a gate: tests/run.sh does not run it. Usage: bash tests/review-instruments/review-20261103-tsk-runner-replay.sh ./tsk [ITERS]
 # item3-tsk-runner-replay.sh TSK [ITERS] — fix-review 20261102T222427Z, item 3 (b1130d8).
-# Replays the deep duplicate-start race of ledger D122/D271 against the `tsk` at path TSK with a
+# Replays the deep duplicate-start race against the `tsk` at path TSK with a
 # FAKE manager: stub `systemctl` and `systemd-run` on PATH that keep units as files under a fake
 # dir and START NOTHING (no real systemd unit is created, stopped or queried). systemd-run records
 # the runner path a unit would execute; the unit "opens" it only when this harness reads it, which

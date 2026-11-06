@@ -2,14 +2,14 @@
 # Copyright (C) 2026 Thomas Lakofski
 """quintessence.remotepolicy — L1: the read-deny policy for the HOSTED remote face.
 
-Design source: the `qq-remote-connector` HEAD, decisions D3 and D10.
+Design decisions D3 and D10 (numbered as in qq-remote-mcp).
 
 D3 named the blocking dependency for the whole remote face: today `filter_redacted` lives ONLY
 in `ask.py`, so `search` and `brief` return UNREDACTED results. Nothing may be exposed to a
 hosted surface until a deny policy covers EVERY remote read verb. This module is that policy,
 hoisted out of `ask` so one object can gate all of them.
 
-TWO ORTHOGONAL AXES (D10, Thomas's ruling — conflating them was the flaw in the first proposal):
+TWO ORTHOGONAL AXES (D10, a design ruling — conflating them was the flaw in the first proposal):
 
   AXIS A — WITHHELD TOPICS (`QQ_REDACT_FILE`, the existing redact-slugs list).
       Model-dependent. A slug is on this list because injecting it into certain readers'

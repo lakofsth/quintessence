@@ -502,7 +502,7 @@ class ReviewRegressions20260729(unittest.TestCase):
         self.assertTrue(any("absorb out-of-band" in m for m in git_log(self.store)))
 
     def test_update_absorbs_stray_edit_as_its_own_commit(self):
-        """2026-08-09, Thomas's ruling (provenance instead of a visible token): the absorb step
+        """2026-08-09 ruling (provenance instead of a visible token): the absorb step
         runs on the PREPEND path too. Until now it was REPLACE-only — data safety was the only
         goal, and a prepend destroys nothing — so a hand edit followed by `qq update` rode the
         update's commit, attributed to the updating session forever. Git is the store's

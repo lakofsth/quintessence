@@ -28,6 +28,12 @@ lock, never rewrites the body, auto-stamps the date) – you cannot clobber anyt
 concurrent sessions can't clobber each other. Reach for it freely, as you work, not just at the
 end. `qq help` lists everything.
 
+Where each verb takes its text from is fixed, and text is landed or refused, never dropped:
+`qq update` takes an argument or stdin (given both, the argument wins and stdin is not read);
+`qq new` and `qq essence` take arguments only; `qq rewrite` takes stdin only. An argument that is
+empty or only whitespace is refused (exit 2, nothing written), as are `qq new` with no text
+argument while data waits on stdin and `qq rewrite` given its text as an argument.
+
 ## The two things to remember
 
 1. **Verbs, not direct edits.** Don't edit the HEAD store's files directly. This scopes to `$QUINTESSENCE_DIR`
@@ -90,8 +96,10 @@ it yourself with `claude mcp add qq-search -- uv run --script <path>/qq-search-m
 `<path>` is your clone of this repository. Once
 registered it exposes six tools mirroring the CLI verbs above: `search_continuity` (≈ `qq
 search`), `ask_continuity` (≈ `qq ask`), `resume_brief` (≈ `qq brief`), `show_head` (≈ `qq show`),
-`update_head` (≈ `qq update` – the common write), and a generic `qq` passthrough for anything
-else. A separate `qq-remote-mcp` server serves a remote caller and is deliberately narrower
+`update_head` (≈ `qq update` – the common write), and a `qq` passthrough for the long tail. The
+passthrough forwards an allowlist of verbs only: `config`, `init`, `reconcile` and `rewrite` are
+not reachable through it, nor is a `--ref probe:` reference (it runs a shell command), and its
+stdin is closed – use the CLI in a terminal for those. A separate `qq-remote-mcp` server serves a remote caller and is deliberately narrower
 (search/ask/brief only, no writes, no `show_head`) – see `CONFIG.md`'s remote-access rows if you're wiring
 a remote interface.
 

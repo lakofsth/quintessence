@@ -12,7 +12,7 @@
 #
 # SOURCED by the hook scripts. Safe no-op unless a non-empty redact list is configured, so it is
 # inert on a stock install. Detection reuses the transcript's message.model — the only reliable
-# model signal (the banner is client-side; cf. fable-downgrade-scan). NOTE: at a given hook firing
+# model signal (the banner is client-side). NOTE: at a given hook firing
 # the transcript shows the model that answered the PREVIOUS turn (the model for THIS turn is chosen
 # model after the hook runs), so detection is "last-known model" and we FAIL SAFE: unknown -> redact.
 #

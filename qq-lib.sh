@@ -50,7 +50,7 @@ QQ_BODY_HARD_BYTES="${QQ_BODY_HARD_BYTES:-49152}"
 # write-path) carries a matching "qq-contract vN" marker. Bump BOTH when the write-path verbs or
 # rules change; `qq doctor` compares them so a drifted/stale injected contract gets flagged
 # (confidently-wrong instructions are worse than none).
-QQ_CONTRACT_VERSION=3
+QQ_CONTRACT_VERSION=4
 
 # Runtime state (activity log, findings queue, prederive cache) — kept OUT of the engine/repo
 # dir (and out of an ephemeral plugin dir) so it survives updates and never pollutes a tracked

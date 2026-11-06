@@ -598,7 +598,7 @@ def _in_index_scope(rel: str) -> bool:
 def _absorb_all_heads_out_of_band(store: Store) -> None:
     """Absorb EVERY hand-edited (or hand-created) top-level HEAD, each as its own absorb
     commit — for the verbs that COMMIT a regenerated INDEX.md (finalize, delete, `qq check
-    --write`'s reindex fix). Thomas's 2026-08-10 ruling, closing the f1a0a14 review's
+    --write`'s reindex fix). A 2026-08-10 ruling, closing the f1a0a14 review's
     residual: INDEX.md re-derives a line from every HEAD, so path-scoped absorption let an
     index commit carry content from a DIFFERENT, still-dirty HEAD before that HEAD's own
     history recorded it. Swept first, the rule is global: anything committed is either
@@ -807,7 +807,7 @@ def _execute_write(store: Store, target: str, content: str, *, msg: Optional[str
                 f"session deleted it) — nothing written. See journal/{topic_hint}/ to recover.", 1)
 
         # Absorb an out-of-band edit BEFORE this verb's own write lands (2026-07-29 review
-        # lock-2, extended to the prepend path 2026-08-09 by Thomas's ruling). Two reasons,
+        # lock-2, extended to the prepend path by a 2026-08-09 ruling). Two reasons,
         # one per mode: on REPLACE an uncommitted stray edit would otherwise be destroyed with
         # no trace, not even in git history; on PREPEND it would survive on disk but ride this
         # write's commit — attributed to the writing session forever, which matters because

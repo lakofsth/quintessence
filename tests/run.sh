@@ -50,7 +50,7 @@ export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 # derives a `[<model>, session <id8>]` marker into every update-line it writes when the harness
 # names a session in the environment -- so this suite, which is routinely run BY an agent session,
 # would otherwise produce different bytes depending on who invoked it, and the exact-text pins in
-# test-write-surface.sh would pass for Thomas and fail for a session (or the reverse).
+# test-write-surface.sh would pass for a person and fail for a session (or the reverse).
 #
 # Unconditional, and deliberately NOT the "a caller's own value wins" idiom the locale/git-identity
 # /QQ_CACHE blocks above use: for those, the caller's value is a legitimate preference. Here the

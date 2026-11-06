@@ -82,7 +82,10 @@ part of qq is one of them:
   orders of magnitude.
 
 - **Hooks fail open, never block.** The harness integration (resume-surfacing, finalize safety-net)
-  only ever *adds* context and is silent on any failure.
+  only ever *adds* context and is silent on any failure. One hook goes a step further and is
+  bounded for it: the idle-checkpoint autosave can *wake* a quiet session, once, to save its
+  synthesis before idle compaction – only after genuine new activity since the last checkpoint,
+  never on its own wake (so it cannot loop), and switchable off with one config key.
 
 - **Externalize state to work around a working-set limit.** The same trick the tool gives the model, applied
   to the model itself: a bounded-context reasoner holds a large plan coherently by *writing it down*,

@@ -12,7 +12,7 @@ ENGINE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 QQ="${QQ_BIN:-$ENGINE/qq}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-# HOME isolation so the user store + walk-up boundary live under TMP (NOT Thomas's real ~). Do
+# HOME isolation so the user store + walk-up boundary live under TMP (NOT the operator's real ~). Do
 # NOT export QUINTESSENCE_DIR — that would pin and disable discovery, which is the whole point.
 export HOME="$TMP"
 # Defensive: an inherited QUINTESSENCE_DIR/QQ_MEMDIR (e.g. from setup.sh's own environment, or a

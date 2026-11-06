@@ -14,7 +14,7 @@
 #   RATIFICATION (manual flow): a trusted session replays the JSON-decoded queued text through
 #           the same verb and the content lands.
 # Model identity is injected via QQ_MODEL_TRANSCRIPT pointing at fixture transcripts — the
-# same last-known-model signal the deployed gate reads, without depending on the invoking
+# same last-known-model signal the gate reads, without depending on the invoking
 # session's own transcript (the explicit override always beats CLAUDE_CODE_SESSION_ID
 # derivation, so this suite is immune to the ambient environment it runs in).
 # NEVER touches the live store — mktemp fixtures, own QQ_CONFIG/QQ_STATE_DIR, same isolation

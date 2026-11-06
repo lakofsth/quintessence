@@ -23,20 +23,27 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 QQ_SCRIPT = os.path.join(REPO_ROOT, "qq")
 
+# The tripwire's word carries a per-run nonce. The stub's stdout sits beside output that names
+# fixture paths under TMPDIR, and a fixed word searched for anywhere in that stdout is decided by
+# what the scratch directory is called (tests/INVARIANTS.md
+# a-test-oracle-over-paths-does-not-read-the-scratch-directory-name): a nonce no scratch name holds.
+LEGACY_CALLED = "LEGACY-CALLED-" + uuid.uuid4().hex
+
 FAKE_LEGACY = """#!/usr/bin/env python3
 import sys
-sys.stdout.write("LEGACY-CALLED argv=" + repr(sys.argv[1:]) + "\\n")
+sys.stdout.write(%r + " argv=" + repr(sys.argv[1:]) + "\\n")
 data = sys.stdin.read()
 if data:
     sys.stdout.write("LEGACY-STDIN=" + repr(data) + "\\n")
 if sys.argv[1:2] == ["exit-code"]:
     sys.exit(int(sys.argv[2]))
 sys.exit(7)
-"""
+""" % LEGACY_CALLED
 
 # search/ask: direct-exec'd straight to qq-search/qq-ask, NEVER via qq-legacy (see
 # the `qq` file's `_DIRECT_EXEC` comment for the grounded env-leak bug this avoids) — a
@@ -101,7 +108,7 @@ class TestNativeVerbsDoNotDelegate(DispatcherHarness):
         p = self.run_qq(["menu"])
         self.assertEqual(p.returncode, 0)
         self.assertIn("# Quintessence — exit-note menu", p.stdout)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
 
     def test_no_args_defaults_to_menu_natively(self):
         p = self.run_qq([])
@@ -131,7 +138,7 @@ class TestNativeVerbsDoNotDelegate(DispatcherHarness):
         p = self.run_qq(["findings", "bogus"])
         self.assertEqual(p.returncode, 2)
         self.assertIn("usage: qq findings [next|list]", p.stderr)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
 
     def test_show_missing_topic_is_native(self):
         p = self.run_qq(["show", "nope"])
@@ -197,7 +204,7 @@ class TestNativeVerbsDoNotDelegate(DispatcherHarness):
             p = self.run_qq([flag])
             self.assertEqual(p.returncode, 0, flag)
             self.assertIn("usage: qq [command] [args]", p.stdout)
-            self.assertNotIn("LEGACY-CALLED", p.stdout)
+            self.assertNotIn(LEGACY_CALLED, p.stdout)
 
 
 class TestCheckFamilyIsNative(DispatcherHarness):
@@ -207,7 +214,7 @@ class TestCheckFamilyIsNative(DispatcherHarness):
     def test_check_fast_on_empty_store_is_native(self):
         p = self.run_qq(["check", "--fast"])
         self.assertEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         # an empty store has no INDEX.md yet -> the one T1 finding an empty store always has
         self.assertIn("INDEX.md stale vs HEADs", p.stdout)
 
@@ -220,7 +227,7 @@ class TestCheckFamilyIsNative(DispatcherHarness):
         finding recorded is "[T1 fix]", not the old flag-only "[T1 index]"."""
         p = self.run_qq(["check", "--write", "--fast"])
         self.assertEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("Tier-1 + skipped T2-xref finding(s)", p.stdout)
         findings_path = os.path.join(self.tmp, "state", "pending-findings.md")
         with open(findings_path) as f:
@@ -265,20 +272,20 @@ class TestCheckFamilyIsNative(DispatcherHarness):
     def test_reconcile_no_registry_is_native(self):
         p = self.run_qq(["reconcile"])
         self.assertEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("qq reconcile: no registry", p.stdout)
 
     def test_waveoff_missing_memory_is_native(self):
         p = self.run_qq(["waveoff", "nomem", "nohead"])
         self.assertEqual(p.returncode, 1)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("no memory file 'nomem'", p.stderr)
 
     def test_waveoff_usage_error_is_native(self):
         p = self.run_qq(["waveoff", "onlyone"])
         self.assertEqual(p.returncode, 2)
         self.assertIn("usage: qq waveoff", p.stderr)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
 
     def test_waveoff_head_bulk_on_an_unindexable_store_degrades_cleanly(self):
         """A bare `--head` bulk waveoff needs the embedding index (unlike the 2-arg single-pair
@@ -289,7 +296,7 @@ class TestCheckFamilyIsNative(DispatcherHarness):
         p = self.run_qq(["waveoff", "--head", "sometopic", "--all"])
         self.assertEqual(p.returncode, 1)
         self.assertNotIn("Traceback", p.stderr)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("qq waveoff --head:", p.stderr)
 
 
@@ -303,7 +310,7 @@ class TestDelegation(DispatcherHarness):
     def test_unknown_verb_errors_natively_with_usage(self):
         p = self.run_qq(["totally-bogus-verb"])
         self.assertEqual(p.returncode, 2)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("qq: unknown command 'totally-bogus-verb'", p.stderr)
         self.assertIn("usage: qq", p.stderr)
 
@@ -315,19 +322,19 @@ class TestDelegation(DispatcherHarness):
         for argv in (["config"], ["init"], ["compact", "t"], ["delete", "t"],
                      ["rm", "t"], ["reindex"]):
             p = self.run_qq(argv)
-            self.assertNotIn("LEGACY-CALLED", p.stdout, f"{argv[0]} must not delegate")
+            self.assertNotIn(LEGACY_CALLED, p.stdout, f"{argv[0]} must not delegate")
 
     def test_missing_topic_verbs_refuse_natively(self):
         for verb, rc in (("compact", 1), ("delete", 1), ("rm", 1)):
             p = self.run_qq([verb, "no-such-topic"])
             self.assertEqual(p.returncode, rc, f"{verb}: {p.stderr}")
             self.assertIn(f"no HEAD 'no-such-topic'", p.stderr)
-            self.assertNotIn("LEGACY-CALLED", p.stdout)
+            self.assertNotIn(LEGACY_CALLED, p.stdout)
 
     def test_reindex_is_native_and_writes_index(self):
         p = self.run_qq(["reindex"])
         self.assertEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("reindexed", p.stdout)
         self.assertTrue(os.path.isfile(os.path.join(self.store_dir, "INDEX.md")))
 
@@ -350,12 +357,12 @@ class TestSearchAskDirectExec(DispatcherHarness):
     def test_search_direct_execs_to_qq_search_not_legacy(self):
         p = self.run_qq(["search", "a query"])
         self.assertIn("DIRECT-CALLED[qq-search] argv=['a query']", p.stdout)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
 
     def test_ask_direct_execs_to_qq_ask_not_legacy(self):
         p = self.run_qq(["ask", "a question"])
         self.assertIn("DIRECT-CALLED[qq-ask] argv=['a question']", p.stdout)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
 
     def test_extra_args_all_forwarded(self):
         p = self.run_qq(["search", "-k", "8", "-g", "some query", "--json"])
@@ -390,7 +397,7 @@ class TestWriteVerbsAreNative(DispatcherHarness):
     def test_new_is_native_and_scaffolds(self):
         p = self.run_qq(["new", "alpha", "an essence"])
         self.assertEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         with open(os.path.join(self.store_dir, "alpha.md")) as f:
             text = f.read()
         self.assertIn("# Quintessence — alpha", text)
@@ -401,14 +408,14 @@ class TestWriteVerbsAreNative(DispatcherHarness):
         self.run_qq(["new", "alpha", "e"])
         p = self.run_qq(["new", "alpha", "dup"])
         self.assertEqual(p.returncode, 1)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("already exists", p.stderr)
 
     def test_update_is_native_arg_and_stdin_forms(self):
         self.run_qq(["new", "alpha", "e"])
         p = self.run_qq(["update", "alpha", "arg-text"])
         self.assertEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         p2 = self.run_qq(["update", "alpha"], stdin="stdin-text\n")
         self.assertEqual(p2.returncode, 0)
         with open(os.path.join(self.store_dir, "alpha.md")) as f:
@@ -420,7 +427,7 @@ class TestWriteVerbsAreNative(DispatcherHarness):
         self.run_qq(["new", "alpha", "seed"])
         p = self.run_qq(["essence", "alpha", "refreshed"])
         self.assertEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         with open(os.path.join(self.store_dir, "alpha.md")) as f:
             text = f.read()
         self.assertIn("> essence: refreshed", text)
@@ -428,7 +435,7 @@ class TestWriteVerbsAreNative(DispatcherHarness):
     def test_essence_missing_head_refuses_natively(self):
         p = self.run_qq(["essence", "ghost", "text"])
         self.assertEqual(p.returncode, 1)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("no HEAD 'ghost'", p.stderr)
 
     def test_rewrite_is_native(self):
@@ -436,7 +443,7 @@ class TestWriteVerbsAreNative(DispatcherHarness):
         p = self.run_qq(["rewrite", "alpha"],
                          stdin="# Quintessence — alpha\n> essence: seed\n\n## Notes\nnew\n")
         self.assertEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         with open(os.path.join(self.store_dir, "alpha.md")) as f:
             text = f.read()
         self.assertIn("## Notes\nnew", text)
@@ -447,7 +454,7 @@ class TestWriteVerbsAreNative(DispatcherHarness):
         `qq new`, matching `update`'s existing missing-HEAD refusal."""
         p = self.run_qq(["rewrite", "ghost"], stdin="whatever\n")
         self.assertEqual(p.returncode, 1)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertIn("qq new", p.stderr)
         self.assertFalse(os.path.isfile(os.path.join(self.store_dir, "ghost.md")))
 
@@ -456,7 +463,7 @@ class TestWriteVerbsAreNative(DispatcherHarness):
         for verb in ("finalize", "checkpoint", "save"):
             p = self.run_qq([verb, "alpha"])
             self.assertEqual(p.returncode, 0, verb)
-            self.assertNotIn("LEGACY-CALLED", p.stdout, verb)
+            self.assertNotIn(LEGACY_CALLED, p.stdout, verb)
         journal_dir = os.path.join(self.store_dir, "journal", "alpha")
         self.assertTrue(os.path.isdir(journal_dir))
         self.assertGreaterEqual(len(os.listdir(journal_dir)), 1)
@@ -467,7 +474,7 @@ class TestWriteVerbsAreNative(DispatcherHarness):
         self.run_qq(["new", "alpha", "e"])
         p = self.run_qq(["update", "alpha", "--bogus-flag"])
         self.assertNotEqual(p.returncode, 0)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         with open(os.path.join(self.store_dir, "alpha.md")) as f:
             text = f.read()
         self.assertNotIn("--bogus-flag", text)
@@ -500,7 +507,7 @@ class TestDashArgFootguns(DispatcherHarness):
         p = self.run_qq(["init", "--help"])
         self.assertEqual(p.returncode, 0)
         self.assertIn("usage: qq init", p.stdout)
-        self.assertNotIn("LEGACY-CALLED", p.stdout)
+        self.assertNotIn(LEGACY_CALLED, p.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.store_dir, ".git")),
                          "`qq init --help` must render help, not scaffold a store")
 
@@ -528,7 +535,7 @@ class TestDashArgFootguns(DispatcherHarness):
             # Same phrase the older flag-shaped-topic guard uses — the advice loop-breaker in
             # tests/test-write-surface.sh greps for it, so both guards must speak with one voice.
             self.assertIn("looks like a command-line flag", p.stderr, f"{args} refusal message")
-            self.assertNotIn("LEGACY-CALLED", p.stdout)
+            self.assertNotIn(LEGACY_CALLED, p.stdout)
 
     def test_init_dash_arg_does_not_scaffold(self):
         p = self.run_qq(["init", "--foo"])

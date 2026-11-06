@@ -144,10 +144,9 @@ def _readable_store_texts():
     """Read every real-store file once; return ([(path, text)], [unreadable paths]).
 
     A file this account cannot open is NOT evidence about heads.parse/serialize — it is a
-    fact about the account. Unattended runs read the real store as a non-owner ever since
-    the queue pinned QUINTESSENCE_DIR=~/quintessence for the worker uid (the
+    fact about the account. An unattended run under another uid reads the real store as a non-owner (the
     store holds owner-only mode-600 HEADs), and an unguarded open there raised
-    PermissionError, which the ABSOLUTE-GREEN landing gate reads as a red of the branch
+    PermissionError, which an ABSOLUTE-GREEN landing gate reads as a red of the branch
     under test. So: unreadable files leave the population with a printed count rather than
     raising, and a run that could read NOTHING skips and says so. The parity assertion
     itself is unchanged for any account that can read the whole store."""

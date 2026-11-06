@@ -188,10 +188,10 @@ class TestResolverDedupBySymlink(unittest.TestCase):
 
 
 class TestPerTierNamespaceResolution(unittest.TestCase):
-    """P4.5: the namespace design ruling (Thomas 2026-07-03, "global namespace is a pain").
-    Live examples the ruling names verbatim: a HEAD `roadmap` colliding on basename with
-    ~/docs/roadmap.md (store wins outright — "dissolved", not an ambiguity); ~/docs/backlog.md
-    vs ~/infra/backlog.md (pure kb, two distinct sources — ambiguous); the qualified-path escape
+    """P4.5: the namespace design ruling (2026-07-03).
+    Examples: a HEAD `roadmap` colliding on basename with
+    docs/roadmap.md (store wins outright — "dissolved", not an ambiguity); docs/backlog.md
+    vs ops/backlog.md (pure kb, two distinct sources — ambiguous); the qualified-path escape
     hatch for picking one of several same-named kb docs on purpose."""
 
     def setUp(self):

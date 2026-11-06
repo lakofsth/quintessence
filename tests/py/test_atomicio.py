@@ -57,7 +57,7 @@ def _letter_bearing_token(width: int, seq: int) -> bytes:
     that needs its temp RECOGNISED was therefore asserting a coin flip: nine of them across this
     file, tests/py/test_search.py and tests/test-setup-wire.sh. Thirteen of the tails they draw
     decide an assertion — twelve in the python gate, one in the installer suite — so the python
-    gate went red about one run in twenty-four until the tails were held still (D77).
+    gate went red about one run in twenty-four until the tails were held still.
 
     NOT a name spelled by hand: only the randomness is pinned, and the temp is still opened by
     `_open_unique_temp` itself, so a change to the writer's spelling or width still moves the
@@ -543,7 +543,7 @@ class TestReviewFindings(unittest.TestCase):
         The RANDOMNESS is pinned (`_letter_bearing_token`) while the name still comes from the
         writer. Left free, "the writer's own temp must be reclaimable" is not true of every temp
         the writer emits: the predicate wants a hex letter and about one tail in 281 has none, so
-        this assertion flaked from the day that condition landed (D77). The all-decimal tail is
+        this assertion flaked from the day that condition landed. The all-decimal tail is
         pinned in the other direction, once, by
         `test_a_temp_the_writer_really_wrote_with_an_all_decimal_tail_is_not_reclaimed` — one
         authoritative pin each way, neither of them a coin flip."""
@@ -1074,7 +1074,10 @@ class TestReviewFindings(unittest.TestCase):
             f"is {len(os.path.basename(target))} byte(s) against a NAME_MAX of {name_max}: an "
             f"operator told to shorten it has been sent to the wrong fix, and the one that would "
             f"work — a shallower directory — is not mentioned")
-        self.assertNotIn("temp-name room", str(ctx.exception),
+        # The message names fixture paths under TMPDIR; the word is read with them taken out, so the
+        # scratch directory's name cannot decide it (tests/INVARIANTS.md
+        # a-test-oracle-over-paths-does-not-read-the-scratch-directory-name).
+        self.assertNotIn("temp-name room", str(ctx.exception).replace(self.tmp, "<tmp>"),
                          "and the budget arithmetic must not be in the message either")
 
         with open(target, "w") as fh:           # the control: the PATH itself is fine
@@ -1299,7 +1302,7 @@ class TestReviewFindings(unittest.TestCase):
         # they could not exercise the predicate that decides what gets deleted, and the primitive
         # matching on prefix ALONE went unnoticed through several passes (eighth pass, F2).
         #
-        # The tails are held still as well as produced by the writer (D77): the reclaim only
+        # The tails are held still as well as produced by the writer: the reclaim only
         # claims a tail carrying a hex letter, so litter left on the real randomness is
         # unreclaimable about one temp in 281 and "stale litter must be reclaimed" was a coin
         # flip. Distinct seeds because the forced token IS the name.
@@ -1464,7 +1467,7 @@ class TestReviewFindings(unittest.TestCase):
         # The name comes from the WRITER, then the same basename is planted in the other
         # directory. Spelling it by hand would pin whatever the writer emitted the day it was
         # typed (rule 7, and eighth pass F2 in this file's own history).
-        # The tail is held still as well (D77): only a tail carrying a hex letter is reclaimed at
+        # The tail is held still as well: only a tail carrying a hex letter is reclaimed at
         # all, so on the real randomness "the name in the repo is deleted" was a coin flip about
         # one run in 281.
         in_repo = _writer_temp(mod, self._p("dotfiles"), "config")
@@ -1626,7 +1629,7 @@ class TestReviewFindings(unittest.TestCase):
         p = self._p("target")
         atomic_write_text(p, "v1")
 
-        # Both tails held still (D77). AGE has to be the only thing separating these two, and on
+        # Both tails held still. AGE has to be the only thing separating these two, and on
         # the real randomness it was not: an all-decimal tail is refused by the predicate
         # whatever its age, so `past` survived about one run in 281 and the pin read as a
         # too-wide grace.

@@ -28,7 +28,7 @@ from quintessence.search import SearchIndex, cache_identity, identity_cache_path
 
 def _nonce_slug(stem: str) -> str:
     """A fixture name that cannot occur in the ambient scratch directory's path: a test's oracle
-    over hit paths must not depend on what TMPDIR happens to be called (ledger D1344)."""
+    over hit paths must not depend on what TMPDIR happens to be called."""
     scratch = os.path.realpath(tempfile.gettempdir())
     while True:
         slug = f"{stem}-{uuid.uuid4().hex[:12]}"
@@ -63,7 +63,7 @@ def _letter_bearing_token(width: int, seq: int) -> bytes:
     characters and an operator's `date +%Y%m%d%H%M` backup sat inside the width (twenty-first
     pass, F2). About one tail in 281 therefore comes out all-decimal and is never claimed, so
     every fixture below that needs its temp RECOGNISED was asserting a coin flip: four of the nine
-    such pins in the estate are in this file (D77).
+    such pins in the repository are in this file.
 
     NOT a name spelled by hand: only the randomness is pinned, and the temp is still opened by
     `_open_unique_temp` itself (rule 7). Width comes from whatever `os.urandom` was asked for, so
@@ -747,7 +747,7 @@ class TestRedaction(unittest.TestCase):
     def test_search_drops_redacted_hit_via_embedder_path(self):
         # A nonce slug, because the redaction matcher also matches an entry as a SUBSTRING of
         # the hit path, which here is absolute under TMPDIR: a fixed slug would be matched by
-        # an ambient scratch directory of the same name and redact every hit (ledger D1344).
+        # an ambient scratch directory of the same name and redact every hit.
         secret = _nonce_slug("secret-topic")
         with tempfile.TemporaryDirectory() as base:
             write_corpus(base, n=1, source="docs")
@@ -975,7 +975,7 @@ class TestGCStaleIdentityCaches(unittest.TestCase):
             # that instance and left the same trap armed for the next width change. Asking the
             # producer removes it (Rule 7) — and the same fixture-shape drift is what left the
             # reclaim's prefix condition unpinned in test_atomicio (sixteenth pass, F5).
-            # The TAIL is held still as well (D77): the delete predicate claims only tails
+            # The TAIL is held still as well: the delete predicate claims only tails
             # carrying a hex letter, so on the real randomness `stale` was unreclaimable about
             # one run in 281 and this went red for a reason that is ruled behaviour.
             import quintessence.atomicio as atomicio
@@ -1032,7 +1032,7 @@ class TestGCStaleIdentityCaches(unittest.TestCase):
 
             links = []
             for i in range(2):
-                # Tail held still (D77) — the fixture guard below holds only for a tail carrying
+                # Tail held still — the fixture guard below holds only for a tail carrying
                 # a hex letter, which is all but about one tail in 281.
                 generated = _writer_temp(atomicio, cache_dir, "embeddings.json", seq=i)
                 os.unlink(generated)
@@ -1220,7 +1220,7 @@ class TestGCStaleIdentityCaches(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             cache_dir = os.path.join(base, "cache")
             os.makedirs(cache_dir, exist_ok=True)
-            # Tail held still (D77): the fixture guard below wants a name the DELETE predicate
+            # Tail held still: the fixture guard below wants a name the DELETE predicate
             # claims, and about one tail in 281 is all-decimal, which it does not.
             generated = _writer_temp(atomicio, cache_dir, "embeddings")
             os.unlink(generated)             # the NAME is the fixture; the cache is written below
@@ -1283,7 +1283,7 @@ class TestGCStaleIdentityCaches(unittest.TestCase):
 
             # From the producer, not spelled by hand (Rule 7) — this is the one shape a sweep
             # MAY claim, and the reclaim half has to keep working. The tail is held still with
-            # it (D77): a sweep may claim only tails carrying a hex letter, so the third
+            # it: a sweep may claim only tails carrying a hex letter, so the third
             # assertion was a coin flip about one run in 281.
             litter = _writer_temp(atomicio, cache_dir, "embeddings.json")
             self._age(litter, 2 / 24)

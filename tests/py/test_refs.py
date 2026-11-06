@@ -112,7 +112,7 @@ class TestExtraction(unittest.TestCase):
                           [("git", "dist@0185664")])
         # no alias / unmapped prefix word / bare sha: all skipped
         self.assertEqual(r.extract_referents(
-            "commit e225ad5, session e794791a, tree cef7aed", rm), [])
+            "commit e225ad5, build 0a1b2c3d, tree cef7aed", rm), [])
 
     def test_commit_alias_at_form_and_case_insensitive(self):
         rm = {"dist": "/nowhere", "kernel": "/nowhere2"}
@@ -132,7 +132,7 @@ class TestExtraction(unittest.TestCase):
                                 ("unit", "fan-synth.service")])
 
     def test_target_units_out_of_scope(self):
-        self.assertEqual(r.extract_referents("pause ca.target freely", {}), [])
+        self.assertEqual(r.extract_referents("pause app.target freely", {}), [])
 
     def test_dedup_and_cap(self):
         text = " ".join("/etc/hostname" for _ in range(5))
@@ -221,7 +221,7 @@ class TestBareShaResolution(unittest.TestCase):
         self.assertEqual(r.extract_referents(f"landed {self.sha_a[:9]}", rm), [])
 
     def test_alias_fanout_is_one_repo_not_ambiguity(self):
-        # several aliases naming ONE worktree (kernel/ca/... pattern) must not fake ambiguity;
+        # several aliases naming ONE worktree (kernel/app/... pattern) must not fake ambiguity;
         # the first-configured alias owns the bind.
         link = os.path.join(self.tmp, "repo-a-link")
         os.symlink(self.repo_a, link)
@@ -363,7 +363,7 @@ class TestPortExtraction(unittest.TestCase):
     negative here is a shape whose loud missing-at-write warning would be a false alarm."""
 
     def test_bare_colon_port(self):
-        self.assertEqual(r.extract_referents("CA substrate :11435 up", {}),
+        self.assertEqual(r.extract_referents("model server :11435 up", {}),
                           [("port", "11435")])
         self.assertEqual(r.extract_referents(":8085 and (:8000)", {}),
                           [("port", "8085"), ("port", "8000")])
@@ -424,7 +424,7 @@ class TestPortExtraction(unittest.TestCase):
     def test_narrowed_delimiter_still_covers_documented_prose_shapes(self):
         # every shape the module's own docstring/tests already rely on keeps working: start of
         # text, whitespace, and open-paren (all curated-set members, not the wide fallback).
-        self.assertEqual(r.extract_referents("CA substrate :11435 up", {}),
+        self.assertEqual(r.extract_referents("model server :11435 up", {}),
                           [("port", "11435")])
         self.assertEqual(r.extract_referents(":8085 and (:8000)", {}),
                           [("port", "8085"), ("port", "8000")])
@@ -528,8 +528,8 @@ class TestRemoteHostExtraction(unittest.TestCase):
     HM = {"nas": "user@nas"}
 
     def test_configured_host_binds(self):
-        got = r.extract_referents("synced nas:/tank/ca-state tonight", {}, self.HM)
-        self.assertEqual(got, [("rfile", "nas:/tank/ca-state")])
+        got = r.extract_referents("synced nas:/tank/app-state tonight", {}, self.HM)
+        self.assertEqual(got, [("rfile", "nas:/tank/app-state")])
 
     def test_home_relative_path_and_case_insensitive_host(self):
         got = r.extract_referents("Nas:~/backups/latest.tar rotated", {}, self.HM)
@@ -540,8 +540,8 @@ class TestRemoteHostExtraction(unittest.TestCase):
         self.assertEqual(r.extract_referents("nas:/tank/x", {}, None), [])
 
     def test_trailing_punctuation_and_globs(self):
-        got = r.extract_referents("moved to nas:/tank/ca-state. Next", {}, self.HM)
-        self.assertEqual(got, [("rfile", "nas:/tank/ca-state")])
+        got = r.extract_referents("moved to nas:/tank/app-state. Next", {}, self.HM)
+        self.assertEqual(got, [("rfile", "nas:/tank/app-state")])
         self.assertEqual(r.extract_referents("prune nas:/tank/*.img weekly", {}, self.HM),
                           [])
 
@@ -576,7 +576,7 @@ class TestRemoteFileDriver(unittest.TestCase):
         listing = "a\t10\t1751600000\nb\t20\t1751600001\n"
         patcher, _ = fake_ssh(stdout="DIR\n" + listing)
         with patcher:
-            fp, status = r._fp_rfile("nas:/tank/ca-state", self.HM)
+            fp, status = r._fp_rfile("nas:/tank/app-state", self.HM)
         import hashlib
         self.assertEqual(status, "ok")
         self.assertEqual(fp, "rdirsha256:" + hashlib.sha256(listing.encode()).hexdigest())
@@ -627,13 +627,13 @@ class TestRemoteFileDriver(unittest.TestCase):
         patcher, _ = fake_ssh(stdout="", returncode=255, stderr="unreachable")
         with patcher:
             with captured_stderr() as buf:
-                r.bind_write(store, "t", "synced nas:/tank/ca-state")
+                r.bind_write(store, "t", "synced nas:/tank/app-state")
         err = buf.getvalue()
         self.assertIn("ref fingerprint error", err)
         self.assertNotIn("born stale", err)
         rec = read_records(store)[0]
         self.assertEqual((rec["kind"], rec["id"], rec["status"]),
-                          ("rfile", "nas:/tank/ca-state", "fp-error"))
+                          ("rfile", "nas:/tank/app-state", "fp-error"))
 
     def test_bind_write_missing_remote_warns_loud(self):
         tmp = tempfile.mkdtemp()
@@ -845,20 +845,14 @@ class TestGitDriver(unittest.TestCase):
 # through `fake_systemctl`, against the host's actual manager — can only be answered when the
 # user scope can answer, and the user scope needs a user D-Bus.
 #
-# Measured at ed478f5 in the environment the estate's unattended runners actually have,
+# Measured at ed478f5 in the environment an unattended runner started as a system unit has,
 # `env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS bash tests/run.sh`: the python suite came
 # back `Ran 1112 tests ... FAILED (errors=1, skipped=2)`, the single error being this test, and
 # `tests/test-tsk.sh` printed its own `SKIP: no systemd user manager on this host` in the same
-# run. That bash gate is the precedent this one copies rather than an invention of it; ledger
-# D40 and D104 carry the open row ("environment-dependent gate") this closes. the queue worker unit
-# is a SYSTEM unit and no fragment under /etc/systemd/system/<that unit>* sets either variable,
-# so every queue worker on this host lands in exactly the stripped environment — and so does
-# `qq-promote --go` when nothing else supplies a bus: its own gate is `python3 -m pytest tests/py -q`
-# over the dev tip, which measured `1 failed, 1109 passed, 2 skipped` at `ed478f5` in that
-# environment. (The estate's merge gate does NOT reach this repository yet — measured 2026-09-11 at
-# the deployed gate revision, which resolves only the queue's own `tests/run.sh`; the branch that
-# widens it to `tests/run.sh` is unlanded. It gates on absolute green, so on the day it lands this
-# becomes a landing condition too.)
+# run. That bash gate is the precedent this one copies rather than an invention of it. A system
+# unit gets no user bus unless its unit file sets these variables, so any runner started that way
+# lands in exactly the stripped environment, and a gate that requires absolute green would read
+# this error as a red of whatever branch it was judging.
 #
 # The predicate keys on the bus-connection refusal and on NOTHING else — never on `No files
 # found`. A guard that read the absence diagnostic would absorb the exact regression the test
@@ -903,7 +897,7 @@ class TestUnitDriver(unittest.TestCase):
 
 # ---- the guard's own pins -----------------------------------------------------------------------
 # The guard is a predicate over the invoking environment, and an environment-dependent SKIP is
-# the one shape in this repo's ledger that has been written and then found vacuous (D115: three
+# the one shape in this repo's history that has been written and then found vacuous (three
 # rounds asserted the manager-bound assertions never ran in CI; the CI logs showed them running).
 # So the predicate is pinned on doubles in BOTH directions, with no host assumption in the test.
 class TestUserManagerGuard(unittest.TestCase):
@@ -943,7 +937,7 @@ class TestUserManagerGuard(unittest.TestCase):
 def _systemctl_surface() -> set:
     """Every function in `quintessence/refs.py` that invokes systemctl, plus every function in
     that module that calls one — the module's UNIT-DRIVER SURFACE, read from refs.py's own AST so
-    a driver entry point written next month joins the set the day it is written. D40's own note on
+    a driver entry point written next month joins the set the day it is written. An earlier review's note on
     this suite is that its environment guards were "hand-added per environment"; this is the
     enumeration that replaces the hand-list for the unit driver.
 
@@ -1036,7 +1030,7 @@ def _is_bus_guard(decorators) -> bool:
 
 
 class TestBusGuardCoversEveryUnmockedDriverSite(unittest.TestCase):
-    """The class D40/D104 name: an environment-dependent test with no guard is a red gate on
+    """The class: an environment-dependent test with no guard is a red gate on
     whoever invokes it. This quantifies over the derivation rather than trusting the next author
     to remember the decorator exists."""
 

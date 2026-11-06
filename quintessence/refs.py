@@ -276,7 +276,7 @@ def parse_corpus_excludes(config) -> "list[tuple[str, str]]":
 
 def _unique_repos(repo_map: dict[str, str]) -> list[tuple[str, str]]:
     """(alias, path) per REALPATH-unique repo, first-configured alias winning — several aliases
-    can name one worktree (e.g. kernel/ca/my-notes all = one repo), and resolution
+    can name one worktree (e.g. kernel/app/my-notes all = one repo), and resolution
     gating counts REPOS, not aliases, so an alias fan-out must not fake ambiguity (D1) or
     multiple owners (D2)."""
     out: list[tuple[str, str]] = []

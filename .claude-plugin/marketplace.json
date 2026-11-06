@@ -7,8 +7,8 @@
     {
       "name": "quintessence",
       "source": "./",
-      "description": "Session-continuity store for AI agents: durable per-topic HEADs + journal, semantic recall, and a consistency checker. Bundles the write-path hooks and a /quintessence skill.",
-      "version": "0.1.0",
+      "description": "Session-continuity store for AI agents: durable per-topic HEADs + journal, semantic recall, and a consistency checker. Bundles the write-path hooks and the /quintessence and /wrap skills.",
+      "version": "0.16.0",
       "author": { "name": "Thomas Lakofski" },
       "category": "productivity"
     }
